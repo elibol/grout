@@ -7,7 +7,7 @@ use crate::kernels::{
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, fmha_causal,
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
     gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_f16,
-    lm_head_argmax_blocks_f16, qk_norm_f16, qk_norm_rope_kv_decode_raw_f16,
+    lm_head_argmax_blocks_f16, qk_norm_f16, qk_norm_mapped_f16, qk_norm_rope_kv_decode_raw_f16,
     qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16, rms_norm_f16, rms_norm_mapped_f16,
     rope_seq_dynpos_f16,
     rope_seq_f16, silu_mul_2d_f16, splitk_reduce_merge,
@@ -1700,19 +1700,42 @@ impl Qwen3Engine {
                 let q_w = self.layers[0].weights.q_norm.clone();
                 let k_w = self.layers[0].weights.k_norm.clone();
                 let mut out = alloc_f16_ctx(ctx, &[attn_heads + kv_heads, head_dim])?;
-                unsafe {
-                    qk_norm_f16(
-                        &q,
-                        &k,
-                        &*q_w,
-                        &*k_w,
-                        (&mut out).partition([1, head_dim]),
-                        self.cfg.rms_norm_eps,
-                        attn_heads as i32,
-                    )
-                    .generics(vec![head_dim.to_string(), RMS_BLOCK.to_string()])
-                    .execute(ctx)?
-                };
+                if safe_kernels_enabled() {
+                    let rows = attn_heads + kv_heads;
+                    let bs = head_dim.next_power_of_two();
+                    unsafe {
+                        qk_norm_mapped_f16(
+                            (&mut out).partition([1, bs]).map([1, 1], rows as u32),
+                            &q,
+                            &k,
+                            &*q_w,
+                            &*k_w,
+                            self.cfg.rms_norm_eps,
+                            attn_heads as i32,
+                        )
+                        .generics(vec![
+                            head_dim.to_string(),
+                            bs.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .execute(ctx)?
+                    };
+                } else {
+                    unsafe {
+                        qk_norm_f16(
+                            &q,
+                            &k,
+                            &*q_w,
+                            &*k_w,
+                            (&mut out).partition([1, head_dim]),
+                            self.cfg.rms_norm_eps,
+                            attn_heads as i32,
+                        )
+                        .generics(vec![head_dim.to_string(), RMS_BLOCK.to_string()])
+                        .execute(ctx)?
+                    };
+                }
             }
             KernelKind::QkRope => {
                 let attn_heads = self.cfg.num_attention_heads;

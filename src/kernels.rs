@@ -3262,6 +3262,68 @@ pub mod kernels {
         }
     }
 
+    /// Safe-API fused Q+K RMS norm (see rms_norm_mapped_f16 for the pattern):
+    /// one mapped index = one output row, single [1, BLOCK_SIZE] tile with
+    /// BLOCK_SIZE >= N (pow-2, overhang masked). Rows [0, num_q_rows) are
+    /// normalized Q via q_weight; the rest are K via k_weight. Host contract:
+    /// out.partition([1, BLOCK_SIZE]).map([1, 1], num_q_rows + num_kv_rows).
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (max_divisibility=8,),
+                         sm_120 = (max_divisibility=8,),
+                       ))]
+    fn qk_norm_mapped_f16<const N: i32, const BLOCK_SIZE: i32, const MAP_SHAPE: [i32; 2]>(
+        mut out: MappedPartitionMut<f16, { [1, BLOCK_SIZE] }, MAP_SHAPE>,
+        q: &Tensor<f16, { [-1, N] }>,
+        k: &Tensor<f16, { [-1, N] }>,
+        q_weight: &Tensor<f16, { [N] }>,
+        k_weight: &Tensor<f16, { [N] }>,
+        eps: f32,
+        num_q_rows: i32,
+    ) {
+        let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
+        let q_part: Partition<f16, { [1, BLOCK_SIZE] }> = q.partition(tile_shape);
+        let k_part: Partition<f16, { [1, BLOCK_SIZE] }> = k.partition(tile_shape);
+        let qw_part: Partition<f16, { [BLOCK_SIZE] }> =
+            q_weight.partition(const_shape![BLOCK_SIZE]);
+        let kw_part: Partition<f16, { [BLOCK_SIZE] }> =
+            k_weight.partition(const_shape![BLOCK_SIZE]);
+
+        for index in out.iter_indices() {
+            let (row, j) = index.components();
+            let is_q: bool = row < num_q_rows;
+            let local_row: i32 = if is_q { row } else { row - num_q_rows };
+
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = if is_q {
+                q_part.load([local_row, j])
+            } else {
+                k_part.load([local_row, j])
+            };
+            let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = if is_q {
+                qw_part.load([j]).reshape(tile_shape)
+            } else {
+                kw_part.load([j]).reshape(tile_shape)
+            };
+            let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
+
+            let sq: Tile<f32, { [1, BLOCK_SIZE] }> = tx * tx;
+            let rms: Tile<f32, { [1] }> = reduce_sum(sq, 1i32);
+            let rms: Tile<f32, { [] }> = rms.reshape(const_shape![]);
+            let rms: f32 = tile_to_scalar(rms);
+            let n: f32 = convert_scalar(N);
+            let inv_rms: f32 = rms / n + eps;
+            let inv_rms: Tile<f32, { [] }> = rsqrt(scalar_to_tile(inv_rms), ftz::Disabled);
+            let inv_rms: f32 = tile_to_scalar(inv_rms);
+            let inv_rms: Tile<f32, { [1, BLOCK_SIZE] }> = inv_rms.broadcast(tile_shape);
+
+            let tw: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tw_f16);
+            let tout: Tile<f32, { [1, BLOCK_SIZE] }> = tx * inv_rms * tw;
+            let tout_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(tout);
+            out.store(tout_f16, index);
+        }
+    }
+
     /// Fused Q+K RMS norm: normalizes both Q and K heads in one kernel launch.
     ///
     /// Output is a single [num_q_rows + num_kv_rows, N] tensor. The first
@@ -4071,7 +4133,7 @@ pub use kernels::{
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
     fmha_prefill_gqa_lpt_split, gather_row_f16, gemm_f16, group_gemm_f16_nt_desc,
     kv_cache_update_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_f16,
-    lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge, qk_norm_f16,
+    lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge, qk_norm_f16, qk_norm_mapped_f16,
     qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16,
     rms_norm_f16, rms_norm_mapped_f16, rms_norm_persistent_f16, rope_f16, rope_seq_dynpos_f16,
     rope_seq_f16,
