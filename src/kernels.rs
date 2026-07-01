@@ -295,6 +295,51 @@ pub mod kernels {
         out.store(y_f16);
     }
 
+    /// Safe-API RMS norm: one mapped index = one row, computed on a single
+    /// [1, BLOCK_SIZE] tile with BLOCK_SIZE >= N (pow-2; overhang is masked by
+    /// tile IR, so the OOB sum-of-squares contribution is zero — same pattern
+    /// as add_rms_norm at BS=2048/4096). Bounds-checked loads + mapped-partition
+    /// disjoint stores; no unsafe. Host contract: partition tile [1, BLOCK_SIZE],
+    /// map [1, 1], num_tile_blocks = rows, BLOCK_SIZE = N.next_power_of_two().
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (max_divisibility=8,),
+                         sm_120 = (max_divisibility=8,),
+                       ))]
+    fn rms_norm_mapped_f16<const N: i32, const BLOCK_SIZE: i32, const MAP_SHAPE: [i32; 2]>(
+        mut out: MappedPartitionMut<f16, { [1, BLOCK_SIZE] }, MAP_SHAPE>,
+        x: &Tensor<f16, { [-1, N] }>,
+        w: &Tensor<f16, { [N] }>,
+        eps: f32,
+    ) {
+        let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
+        let x_part: Partition<f16, { [1, BLOCK_SIZE] }> = x.partition(tile_shape);
+        let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
+
+        for index in out.iter_indices() {
+            let (row, j) = index.components();
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
+            let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
+
+            let sq: Tile<f32, { [1, BLOCK_SIZE] }> = tx * tx;
+            let rms: Tile<f32, { [1] }> = reduce_sum(sq, 1i32);
+            let rms: Tile<f32, { [] }> = rms.reshape(const_shape![]);
+            let rms: f32 = tile_to_scalar(rms);
+            let n: f32 = convert_scalar(N);
+            let inv_rms: f32 = rms / n + eps;
+            let inv_rms: Tile<f32, { [] }> = rsqrt(scalar_to_tile(inv_rms), ftz::Disabled);
+            let inv_rms: f32 = tile_to_scalar(inv_rms);
+            let inv_rms: Tile<f32, { [1, BLOCK_SIZE] }> = inv_rms.broadcast(tile_shape);
+
+            let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([j]).reshape(tile_shape);
+            let tw: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tw_f16);
+            let tout: Tile<f32, { [1, BLOCK_SIZE] }> = tx * inv_rms * tw;
+            let tout_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(tout);
+            out.store(tout_f16, index);
+        }
+    }
+
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=true,
                        optimization_hints = (
@@ -4028,6 +4073,7 @@ pub use kernels::{
     kv_cache_update_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_f16,
     lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge, qk_norm_f16,
     qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16,
-    rms_norm_f16, rms_norm_persistent_f16, rope_f16, rope_seq_dynpos_f16, rope_seq_f16,
+    rms_norm_f16, rms_norm_mapped_f16, rms_norm_persistent_f16, rope_f16, rope_seq_dynpos_f16,
+    rope_seq_f16,
     silu_mul_2d_f16, silu_mul_vec_f16, splitk_reduce_merge,
 };

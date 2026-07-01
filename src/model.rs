@@ -8,7 +8,8 @@ use crate::kernels::{
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
     gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_f16,
     lm_head_argmax_blocks_f16, qk_norm_f16, qk_norm_rope_kv_decode_raw_f16,
-    qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16, rms_norm_f16, rope_seq_dynpos_f16,
+    qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16, rms_norm_f16, rms_norm_mapped_f16,
+    rope_seq_dynpos_f16,
     rope_seq_f16, silu_mul_2d_f16, splitk_reduce_merge,
 };
 use crate::loader::WeightLoader;
@@ -201,6 +202,14 @@ fn env_usize_or(var: &str, default: usize) -> usize {
 
 fn env_bool_or(var: &str, default: bool) -> bool {
     std::env::var(var).ok().map(|v| v != "0").unwrap_or(default)
+}
+
+/// Safe mapped-partition kernels (bounds-checked loads, disjoint mapped
+/// stores; see cutile §5.1 safety-overhead results) are the default. Set
+/// GROUT_UNSAFE_KERNELS=1 to fall back to the legacy unsafe kernels for
+/// per-kernel A/B validation.
+fn safe_kernels_enabled() -> bool {
+    std::env::var("GROUT_UNSAFE_KERNELS").ok().as_deref() != Some("1")
 }
 
 fn env_usize_hint_or(var: &str, default: usize) -> Option<usize> {
@@ -2448,6 +2457,9 @@ impl Qwen3Engine {
 
                     // Input norm (layer 0: plain RMS norm; layers 1+: fused add + RMS norm
                     // that folds in the previous layer's residual add)
+                    // TODO(safe-kernels): switch to rms_norm_mapped_f16 once the
+                    // mapped kernel is GPU-validated in the eager path; the decode
+                    // graph stays on the legacy kernel until then.
                     if layer_idx == 0 {
                         let hidden_2d = bufs
                             .hidden
@@ -5025,6 +5037,40 @@ impl Qwen3Engine {
             "rms_norm output numel mismatch, got {:?}",
             out.shape()
         );
+        if safe_kernels_enabled() {
+            // Safe mapped-partition kernel: one index per row on a single
+            // [1, BS] tile with BS = next_pow2(n) (overhang masked by tile IR;
+            // OOB sum-of-squares contributes zero). Disjoint stores are proved
+            // by the partition map — no unsafe.
+            let bs = n.next_power_of_two();
+            let out = out
+                .reshape(&[rows, n])
+                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
+                .partition([1, bs])
+                .map([1, 1], rows as u32);
+            // The kernel itself is safe; the remaining unsafe is DeviceOp::execute
+            // (the async-executor trait method), which is unsafe for all ops.
+            let result = unsafe {
+                rms_norm_mapped_f16(
+                    value(out),
+                    value(x),
+                    value(weight),
+                    value(self.cfg.rms_norm_eps),
+                )
+                .generics(vec![
+                    n.to_string(),
+                    bs.to_string(),
+                    "1".to_string(),
+                    "1".to_string(),
+                ])
+                .execute(ctx)?
+            };
+            let out = result.0;
+            return Ok(out
+                .unpartition()
+                .reshape(&orig_shape)
+                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?);
+        }
         let out = out
             .reshape(&[rows, n])
             .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
