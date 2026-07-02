@@ -16,32 +16,43 @@ validated on GPU.
 
 ## Ported so far
 
+Built against cutile-rs branch `feat/mapped-partition-rank3-shared-maps`
+(via `[patch.crates-io]` path deps; see Cargo.toml).
+
 | kernel | safe variant | paths switched | still legacy |
 |---|---|---|---|
 | `rms_norm_f16` | `rms_norm_mapped_f16` | eager / StepGraph prefill (all per-layer input norms + final norm), warmup | decode-graph prime/capture (layer-0 norm) |
 | `qk_norm_f16` | `qk_norm_mapped_f16` | warmup | unfused decode-graph path (non-default) |
+| `add_rms_norm_f16` | `add_rms_norm_mapped_f16` (dual outputs share one index stream via `iter_indices_with`) | eager / StepGraph prefill (36 calls/step), warmup | — |
 
-Design note: both ports use one mapped index per row on a single
+(`rope_seq*`, `add_2d`, `silu_mul`, `embedding*`, `argmax*`, `gather_row`
+were already safe `fn`s and need no port.)
+
+Design note: the ports use one mapped index per row on a single
 `[1, next_pow2(N)]` tile with tile-IR masking of the overhang (the
 OOB sum-of-squares contribution is zero) — the same schedule the
 `add_rms_norm` BS=2048/4096 sweeps already validated as fastest. This
-means the hidden-size RMS tile changes from the legacy BS=512 loop to a
-single BS=4096 masked tile; the A/B below is what confirms that on
-sm_120.
+means the hidden-size norm tiles change from the legacy BS=512/2048
+loops to a single BS=4096 masked tile; the A/B below is what confirms
+that on sm_120.
 
-## Not portable on cutile 0.2.0 (API gaps, verified in compiler source)
+## Remaining blockers (cutile API follow-ups)
 
-- `iter_indices()` / `MappedPartitionMut` are **rank-2 only**
-  (`cutile-compiler .. compile_expression.rs`: "currently supports rank-2"),
-  which blocks the rank-3-output kernels: `rope_seq*`, `kv_cache_update_seq*`,
-  all `flash_attn_*` / `fmha_*`, `splitk_reduce_merge`, `qk_rope_dynpos_f16`.
-- Mapped stores reject indices minted by a different partition's map
-  (`compile_intrinsic.rs`: "store requires an index produced by this
-  partition's iter_indices()"), which blocks dual-output kernels:
-  `add_rms_norm_f16` (out + residual_out).
-
-Both are concrete cutile-rs feature requests (rank-3 index schedules;
-shared/broadcast partition maps), not grout limitations.
+- **Bounded / sub-grid mapped launches**: `iter_indices()` traverses the
+  full logical partition grid, but `kv_cache_update_seq*` writes only
+  `seq_len` of `max_seq` cache rows (and the decode variant writes one
+  row). Mapped partitions need either a seq-sliced launch view or
+  Dim-bounded index iteration before the KV-cache kernels can port
+  without traversing (or zero-filling) the whole cache.
+- **Safe loads with pipelining hints**: the attention family's loads use
+  `load_view_tko(..., Some(LATENCY), tma)` for software pipelining
+  (measured 4–15% in the tuning notes); the safe `Partition::load` has
+  no latency parameter. Porting `flash_attn_*`/`fmha_*`/`splitk_reduce_merge`
+  without it would trade measured perf for safety — blocked until the
+  safe load carries the hint.
+- The raw-pointer fused kernels (`qk_norm_rope_kv_*_raw`,
+  `add_rms_norm_decode_raw`, `*_lpt*`, `flash_decode.rs`) are Tier 2:
+  A/B against typed equivalents first, then port or delete.
 
 ## A/B protocol (RTX 5090)
 
