@@ -3,6 +3,7 @@ use crate::cublas;
 use crate::flash_decode::attention_decode_kernel_grouped;
 use crate::kernels::{
     KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_raw_f16, add_rms_norm_f16,
+    add_rms_norm_mapped_f16,
     argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, fmha_causal,
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
@@ -4963,6 +4964,49 @@ impl Qwen3Engine {
             "add_rms_norm residual_out numel mismatch, got {:?}",
             residual_out.shape()
         );
+        if safe_kernels_enabled() {
+            // Safe dual-output kernel: both outputs share one index stream
+            // (iter_indices_with), one row per index on a single masked tile.
+            let bs = n.next_power_of_two();
+            let out = out
+                .reshape(&[rows, n])
+                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
+                .partition([1, bs])
+                .map([1, 1], rows as u32);
+            let residual_out = residual_out
+                .reshape(&[rows, n])
+                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
+                .partition([1, bs])
+                .map([1, 1], rows as u32);
+            let result = unsafe {
+                add_rms_norm_mapped_f16(
+                    value(out),
+                    value(residual_out),
+                    value(residual),
+                    value(x),
+                    value(weight),
+                    value(self.cfg.rms_norm_eps),
+                )
+                .generics(vec![
+                    n.to_string(),
+                    bs.to_string(),
+                    "1".to_string(),
+                    "1".to_string(),
+                ])
+                .execute(ctx)?
+            };
+            let out = result.0;
+            let residual_out = result.1;
+            return Ok((
+                out.unpartition()
+                    .reshape(&orig_shape)
+                    .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?,
+                residual_out
+                    .unpartition()
+                    .reshape(&orig_shape)
+                    .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?,
+            ));
+        }
         let out = out
             .reshape(&[rows, n])
             .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?

@@ -3043,6 +3043,59 @@ pub mod kernels {
         }
     }
 
+    /// Safe-API fused add + RMS norm. Dual outputs share one index stream via
+    /// `iter_indices_with` (multi-origin branding proves both stores disjoint),
+    /// one mapped index per row on a single [1, BLOCK_SIZE] masked tile with
+    /// BLOCK_SIZE >= N — same schedule as rms_norm_mapped_f16. Host contract:
+    /// both outputs partitioned [1, BLOCK_SIZE].map([1, 1], rows) with
+    /// identical shapes; BLOCK_SIZE = N.next_power_of_two().
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (max_divisibility=8,),
+                         sm_120 = (max_divisibility=8,),
+                       ))]
+    fn add_rms_norm_mapped_f16<const N: i32, const BLOCK_SIZE: i32, const MAP_SHAPE: [i32; 2]>(
+        mut out: MappedPartitionMut<f16, { [1, BLOCK_SIZE] }, MAP_SHAPE>,
+        mut residual_out: MappedPartitionMut<f16, { [1, BLOCK_SIZE] }, MAP_SHAPE>,
+        residual: &Tensor<f16, { [-1, N] }>,
+        x: &Tensor<f16, { [-1, N] }>,
+        w: &Tensor<f16, { [N] }>,
+        eps: f32,
+    ) {
+        let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
+        let residual_part: Partition<f16, { [1, BLOCK_SIZE] }> = residual.partition(tile_shape);
+        let x_part: Partition<f16, { [1, BLOCK_SIZE] }> = x.partition(tile_shape);
+        let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
+
+        for index in out.iter_indices_with(&residual_out) {
+            let (row, j) = index.components();
+            let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load([row, j]);
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
+            let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([j]).reshape(tile_shape);
+            let tr: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tr_f16);
+            let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
+            let combined: Tile<f32, { [1, BLOCK_SIZE] }> = tr + tx;
+
+            let sq: Tile<f32, { [1, BLOCK_SIZE] }> = combined * combined;
+            let rms: Tile<f32, { [1] }> = reduce_sum(sq, 1i32);
+            let rms: Tile<f32, { [] }> = rms.reshape(const_shape![]);
+            let rms: f32 = tile_to_scalar(rms);
+            let n: f32 = convert_scalar(N);
+            let inv_rms: f32 = rms / n + eps;
+            let inv_rms: Tile<f32, { [] }> = rsqrt(scalar_to_tile(inv_rms), ftz::Disabled);
+            let inv_rms: f32 = tile_to_scalar(inv_rms);
+            let inv_rms: Tile<f32, { [1, BLOCK_SIZE] }> = inv_rms.broadcast(tile_shape);
+
+            let tw: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tw_f16);
+            let normed: Tile<f32, { [1, BLOCK_SIZE] }> = combined * inv_rms * tw;
+            let normed_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(normed);
+            let combined_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(combined);
+            out.store(normed_f16, index);
+            residual_out.store(combined_f16, index);
+        }
+    }
+
     /// Fused add + RMS norm kernel.
     ///
     /// Computes:  combined = residual + x
@@ -4127,7 +4180,8 @@ pub mod kernels {
 
 #[allow(unused_imports)]
 pub use kernels::{
-    add_2d_f16, add_rms_norm_decode_raw_f16, add_rms_norm_f16, add_vec_f16, argmax_blocks_f16,
+    add_2d_f16, add_rms_norm_decode_raw_f16, add_rms_norm_f16, add_rms_norm_mapped_f16,
+    add_vec_f16, argmax_blocks_f16,
     argmax_reduce_blocks_to_u32, embedding_batch_f16, embedding_f16, flash_attn_causal_f16,
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, flash_attn_f16, fmha_causal,
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
