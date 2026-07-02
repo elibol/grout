@@ -25,6 +25,16 @@ cuda-async = "0.2.0"
 cutile-compiler = "0.2.0"
 cutile = "0.2.0"
 
+# Rank-3 mapped partitions + shared index streams (iter_indices_with) for the
+# safe-kernel migration. Drop this section once the feature branch ships in a
+# crates.io release.
+[patch.crates-io]
+cuda-bindings = { path = "../cutile-rs/cuda-bindings" }
+cuda-core = { path = "../cutile-rs/cuda-core" }
+cuda-async = { path = "../cutile-rs/cuda-async" }
+cutile-compiler = { path = "../cutile-rs/cutile-compiler" }
+cutile = { path = "../cutile-rs/cutile" }
+
 [features]
 benchmarks = []
 
