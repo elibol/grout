@@ -892,6 +892,93 @@ pub mod kernels {
         }
     }
 
+    /// Safe-API KV cache update (prefill, position_start == 0 asserted at the
+    /// call site). Both caches are [kv_heads, max_seq, D] partitioned into
+    /// per-token [1, 1, BLOCK_SIZE] tiles, so the logical grid is
+    /// (kv_heads, max_seq, D/BLOCK_SIZE); `iter_indices_within_with` bounds
+    /// the seq axis to exactly the `seq_len` written tokens and brands one
+    /// index stream for both cache stores. Bounds-checked loads, disjoint
+    /// mapped stores — no unsafe. Host contract: both caches partitioned
+    /// [1, 1, BLOCK_SIZE].map([1, 1, 1], num_tile_blocks) with identical
+    /// shapes and num_tile_blocks.
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_120 = (num_cta_in_cga=2, max_divisibility=16,),
+                       ))]
+    fn kv_cache_update_seq_mapped_f16<
+        const D: i32,
+        const BLOCK_SIZE: i32,
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut k_cache: MappedPartitionMut<f16, { [1, 1, BLOCK_SIZE] }, MAP_SHAPE>,
+        mut v_cache: MappedPartitionMut<f16, { [1, 1, BLOCK_SIZE] }, MAP_SHAPE>,
+        new_k: &Tensor<f16, { [-1, -1, D] }>,
+        new_v: &Tensor<f16, { [-1, -1, D] }>,
+        seq_len: i32,
+    ) {
+        let new_k_part: Partition<f16, { [1, 1, BLOCK_SIZE] }> =
+            new_k.partition(const_shape![1, 1, BLOCK_SIZE]);
+        let new_v_part: Partition<f16, { [1, 1, BLOCK_SIZE] }> =
+            new_v.partition(const_shape![1, 1, BLOCK_SIZE]);
+
+        for index in
+            k_cache.iter_indices_within_with([(0i32, -1i32), (0i32, seq_len), (0i32, -1i32)], &v_cache)
+        {
+            let [head, s, d_block] = index.coords();
+            // position_start == 0, so cache row s reads source row s.
+            let k_tile: Tile<f16, { [1, 1, BLOCK_SIZE] }> = new_k_part.load([s, head, d_block]);
+            let v_tile: Tile<f16, { [1, 1, BLOCK_SIZE] }> = new_v_part.load([s, head, d_block]);
+            k_cache.store(k_tile, index);
+            v_cache.store(v_tile, index);
+        }
+    }
+
+    /// Safe-API KV cache update at a device-read position (decode). Same
+    /// schedule as kv_cache_update_seq_mapped_f16 but the seq-axis sub-range
+    /// starts at the position scalar read from device memory:
+    /// [(0, -1), (pos, seq_len), (0, -1)] — runtime starts are checked
+    /// against the grid, so the store proof still holds. Source row for
+    /// cache row s is s - pos (0 when seq_len == 1 in decode).
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_120 = (occupancy=1, max_divisibility=16,),
+                       ))]
+    fn kv_cache_update_seq_dynpos_mapped_f16<
+        const D: i32,
+        const BLOCK_SIZE: i32,
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut k_cache: MappedPartitionMut<f16, { [1, 1, BLOCK_SIZE] }, MAP_SHAPE>,
+        mut v_cache: MappedPartitionMut<f16, { [1, 1, BLOCK_SIZE] }, MAP_SHAPE>,
+        new_k: &Tensor<f16, { [-1, -1, D] }>,
+        new_v: &Tensor<f16, { [-1, -1, D] }>,
+        position_start: &Tensor<u32, { [1] }>,
+        seq_len: i32,
+    ) {
+        let pos_part = position_start.partition(const_shape![1]);
+        let pos_t_u32: Tile<u32, { [1] }> = pos_part.load([0i32]);
+        let pos_t: Tile<i32, { [1] }> = bitcast(pos_t_u32);
+        let pos: i32 = tile_to_scalar(pos_t.reshape(const_shape![]));
+
+        let new_k_part: Partition<f16, { [1, 1, BLOCK_SIZE] }> =
+            new_k.partition(const_shape![1, 1, BLOCK_SIZE]);
+        let new_v_part: Partition<f16, { [1, 1, BLOCK_SIZE] }> =
+            new_v.partition(const_shape![1, 1, BLOCK_SIZE]);
+
+        for index in
+            k_cache.iter_indices_within_with([(0i32, -1i32), (pos, seq_len), (0i32, -1i32)], &v_cache)
+        {
+            let [head, s, d_block] = index.coords();
+            let src_row: i32 = s - pos;
+            let k_tile: Tile<f16, { [1, 1, BLOCK_SIZE] }> = new_k_part.load([src_row, head, d_block]);
+            let v_tile: Tile<f16, { [1, 1, BLOCK_SIZE] }> = new_v_part.load([src_row, head, d_block]);
+            k_cache.store(k_tile, index);
+            v_cache.store(v_tile, index);
+        }
+    }
+
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=true,
                        optimization_hints = (
@@ -4186,7 +4273,8 @@ pub use kernels::{
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, flash_attn_f16, fmha_causal,
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
     fmha_prefill_gqa_lpt_split, gather_row_f16, gemm_f16, group_gemm_f16_nt_desc,
-    kv_cache_update_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_f16,
+    kv_cache_update_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_dynpos_mapped_f16,
+    kv_cache_update_seq_f16, kv_cache_update_seq_mapped_f16,
     lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge, qk_norm_f16, qk_norm_mapped_f16,
     qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16,
     rms_norm_f16, rms_norm_mapped_f16, rms_norm_persistent_f16, rope_f16, rope_seq_dynpos_f16,

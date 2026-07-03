@@ -7,7 +7,8 @@ use crate::kernels::{
     argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, fmha_causal,
     fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
-    gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_f16,
+    gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_dynpos_mapped_f16,
+    kv_cache_update_seq_f16, kv_cache_update_seq_mapped_f16,
     lm_head_argmax_blocks_f16, qk_norm_f16, qk_norm_mapped_f16, qk_norm_rope_kv_decode_raw_f16,
     qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16, rms_norm_f16, rms_norm_mapped_f16,
     rope_seq_dynpos_f16,
@@ -2648,23 +2649,48 @@ impl Qwen3Engine {
                         let v_3d = v_1d
                             .view(&[1, kv_heads, head_dim])
                             .map_err(|e| anyhow::anyhow!("view failed: {e:?}"))?;
-                        unsafe {
-                            kv_cache_update_seq_dynpos_f16(
+                        if safe_kernels_enabled() {
+                            let ntb = (kv_heads * (head_dim / kv_cache_dyn_chunk_d)) as u32;
+                            kv_cache_update_seq_dynpos_mapped_f16(
+                                (k_cache)
+                                    .partition([1, 1, kv_cache_dyn_chunk_d])
+                                    .map([1, 1, 1], ntb),
+                                (v_cache)
+                                    .partition([1, 1, kv_cache_dyn_chunk_d])
+                                    .map([1, 1, 1], ntb),
                                 &rope_k_ref,
                                 &v_3d,
-                                (k_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
-                                (v_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
                                 &position,
                                 1i32,
                             )
+                            .generics(vec![
+                                head_dim.to_string(),
+                                kv_cache_dyn_chunk_d.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ])
+                            .sync_on(stream)
+                            .map_err(|e| anyhow::anyhow!("prime kv_cache_update failed: {e:?}"))?;
+                        } else {
+                            unsafe {
+                                kv_cache_update_seq_dynpos_f16(
+                                    &rope_k_ref,
+                                    &v_3d,
+                                    (k_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
+                                    (v_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
+                                    &position,
+                                    1i32,
+                                )
+                            }
+                            .generics(vec![
+                                head_dim.to_string(),
+                                kv_cache_dyn_chunk_d.to_string(),
+                                max_seq_len.to_string(),
+                            ])
+                            .sync_on(stream)
+                            .map_err(|e| anyhow::anyhow!("prime kv_cache_update failed: {e:?}"))?;
                         }
-                        .generics(vec![
-                            head_dim.to_string(),
-                            kv_cache_dyn_chunk_d.to_string(),
-                            max_seq_len.to_string(),
-                        ])
-                        .sync_on(stream)
-                        .map_err(|e| anyhow::anyhow!("prime kv_cache_update failed: {e:?}"))?;
                     }
 
                     // Attention (Q from fused RoPE output)
@@ -3207,23 +3233,48 @@ impl Qwen3Engine {
                         let v_3d = v_1d
                             .view(&[1, kv_heads, head_dim])
                             .map_err(|e| anyhow::anyhow!("view v_3d: {e:?}"))?;
-                        s.record(
-                            unsafe {
-                                kv_cache_update_seq_dynpos_f16(
+                        if safe_kernels_enabled() {
+                            let ntb = (kv_heads * (head_dim / kv_cache_dyn_chunk_d)) as u32;
+                            s.record(
+                                kv_cache_update_seq_dynpos_mapped_f16(
+                                    (k_cache)
+                                        .partition([1, 1, kv_cache_dyn_chunk_d])
+                                        .map([1, 1, 1], ntb),
+                                    (v_cache)
+                                        .partition([1, 1, kv_cache_dyn_chunk_d])
+                                        .map([1, 1, 1], ntb),
                                     &rope_k_3d,
                                     &v_3d,
-                                    (k_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
-                                    (v_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
                                     &position,
                                     1i32,
                                 )
-                            }
-                            .generics(vec![
-                                head_dim.to_string(),
-                                kv_cache_dyn_chunk_d.to_string(),
-                                max_seq_len.to_string(),
-                            ]),
-                        )?;
+                                .generics(vec![
+                                    head_dim.to_string(),
+                                    kv_cache_dyn_chunk_d.to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                ]),
+                            )?;
+                        } else {
+                            s.record(
+                                unsafe {
+                                    kv_cache_update_seq_dynpos_f16(
+                                        &rope_k_3d,
+                                        &v_3d,
+                                        (k_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
+                                        (v_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
+                                        &position,
+                                        1i32,
+                                    )
+                                }
+                                .generics(vec![
+                                    head_dim.to_string(),
+                                    kv_cache_dyn_chunk_d.to_string(),
+                                    max_seq_len.to_string(),
+                                ]),
+                            )?;
+                        }
                     }
 
                     // Attention (Q from fused RoPE output)
@@ -5401,6 +5452,82 @@ impl Qwen3Engine {
             .take()
             .context("missing v_cache in layer state")?;
         let bm_s = env_usize_or("GROUT_KV_CACHE_BM_S", KV_CACHE_BM_S_DEFAULT);
+        if safe_kernels_enabled() {
+            // Safe mapped-partition kernels: per-token [1, 1, chunk] cache
+            // tiles, logical grid (kv_heads, max_seq, head_dim/chunk); the
+            // kernel sub-ranges the seq axis to exactly the written tokens
+            // (iter_indices_within_with brands one index stream for both
+            // cache stores). num_tile_blocks mirrors the legacy CTA counts.
+            let kv_heads = self.cfg.num_key_value_heads;
+            let head_dim = self.cfg.head_dim;
+            match position_input {
+                PositionInput::Host(position_start) => {
+                    debug_assert_eq!(
+                        *position_start, 0,
+                        "kv_cache_update_seq_mapped_f16 assumes position_start==0 \
+                         (prefill path); got {position_start}"
+                    );
+                    let num_tile_blocks = kv_heads * seq_len.div_ceil(bm_s);
+                    let k_part = k_cache
+                        .partition([1, 1, VEC_BLOCK])
+                        .map([1, 1, 1], num_tile_blocks as u32);
+                    let v_part = v_cache
+                        .partition([1, 1, VEC_BLOCK])
+                        .map([1, 1, 1], num_tile_blocks as u32);
+                    let result = unsafe {
+                        kv_cache_update_seq_mapped_f16(
+                            value(k_part),
+                            value(v_part),
+                            value(new_k),
+                            value(new_v),
+                            value(seq_len as i32),
+                        )
+                        .generics(vec![
+                            head_dim.to_string(),
+                            VEC_BLOCK.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .execute(ctx)?
+                    };
+                    layer.state.k_cache = Some(Arc::new(result.0.unpartition()));
+                    layer.state.v_cache = Some(Arc::new(result.1.unpartition()));
+                }
+                PositionInput::Device(position_start) => {
+                    let chunk_d =
+                        env_usize_or("GROUT_KV_CACHE_DYN_CHUNK_D", KV_CACHE_DYN_CHUNK_D_DEFAULT);
+                    let num_tile_blocks = kv_heads * (head_dim / chunk_d);
+                    let k_part = k_cache
+                        .partition([1, 1, chunk_d])
+                        .map([1, 1, 1], num_tile_blocks as u32);
+                    let v_part = v_cache
+                        .partition([1, 1, chunk_d])
+                        .map([1, 1, 1], num_tile_blocks as u32);
+                    let result = unsafe {
+                        kv_cache_update_seq_dynpos_mapped_f16(
+                            value(k_part),
+                            value(v_part),
+                            value(new_k),
+                            value(new_v),
+                            value(position_start.clone()),
+                            value(seq_len as i32),
+                        )
+                        .generics(vec![
+                            head_dim.to_string(),
+                            chunk_d.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .execute(ctx)?
+                    };
+                    layer.state.k_cache = Some(Arc::new(result.0.unpartition()));
+                    layer.state.v_cache = Some(Arc::new(result.1.unpartition()));
+                }
+            }
+            return Ok(());
+        }
         let (k_cache, v_cache): (Partition<Tensor<f16>>, Partition<Tensor<f16>>) =
             match position_input {
                 PositionInput::Host(position_start) => {
