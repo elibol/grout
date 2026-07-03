@@ -6,8 +6,8 @@ use crate::kernels::{
     add_rms_norm_mapped_f16,
     argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, fmha_causal,
-    fmha_decode_gqa_split, fmha_decode_gqa_split_mapped, fmha_prefill_causal, fmha_prefill_gqa,
-    fmha_prefill_gqa_lpt,
+    fmha_decode_gqa_split, fmha_decode_gqa_split_mapped, fmha_prefill_causal,
+    fmha_prefill_causal_mapped, fmha_prefill_gqa, fmha_prefill_gqa_lpt, fmha_prefill_gqa_mapped,
     gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_f16, kv_cache_update_seq_mapped_f16,
     lm_head_argmax_blocks_f16, qk_norm_f16, qk_norm_mapped_f16, qk_norm_rope_kv_decode_raw_f16,
@@ -5967,7 +5967,6 @@ impl Qwen3Engine {
                          query_group_size={qgs}"
                     );
                     let m_eff = attn_bm * group;
-                    let out_part = out.partition([attn_bm, group, self.cfg.head_dim]);
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
                     let prefill_latency =
                         env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
@@ -5975,33 +5974,72 @@ impl Qwen3Engine {
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
-                    let result = unsafe {
-                        fmha_prefill_gqa(
-                            value(q.clone()),
-                            value(k_cache.clone()),
-                            value(v_cache.clone()),
-                            value(out_part),
-                            value(qk_scale),
-                            value(query_group_size),
-                            value(kv_len),
-                            value(*position_start as i32),
-                        )
+                    if safe_kernels_enabled() {
+                        // Safe mapped port: one index per CTA on the
+                        // (q_tiles, heads/GROUP, 1) logical grid.
+                        let ntb = (q_len.div_ceil(attn_bm)
+                            * (self.cfg.num_attention_heads / group))
+                            as u32;
+                        let out_part = out
+                            .partition([attn_bm, group, self.cfg.head_dim])
+                            .map([1, 1, 1], ntb);
+                        let result = unsafe {
+                            fmha_prefill_gqa_mapped(
+                                value(out_part),
+                                value(q.clone()),
+                                value(k_cache.clone()),
+                                value(v_cache.clone()),
+                                value(qk_scale),
+                                value(query_group_size),
+                                value(kv_len),
+                                value(*position_start as i32),
+                            )
+                            .generics(vec![
+                                attn_bm.to_string(),
+                                attn_bn.to_string(),
+                                self.cfg.head_dim.to_string(),
+                                group.to_string(),
+                                m_eff.to_string(),
+                                1.to_string(), // CAUSAL
+                                even_k.to_string(),
+                                prefill_latency.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ])
+                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                            .execute(ctx)?
+                        };
+                        result.0.unpartition()
+                    } else {
+                        let out_part = out.partition([attn_bm, group, self.cfg.head_dim]);
+                        let result = unsafe {
+                            fmha_prefill_gqa(
+                                value(q.clone()),
+                                value(k_cache.clone()),
+                                value(v_cache.clone()),
+                                value(out_part),
+                                value(qk_scale),
+                                value(query_group_size),
+                                value(kv_len),
+                                value(*position_start as i32),
+                            )
+                        }
+                        .generics(vec![
+                            attn_bm.to_string(),
+                            attn_bn.to_string(),
+                            self.cfg.head_dim.to_string(),
+                            group.to_string(),
+                            m_eff.to_string(),
+                            1.to_string(), // CAUSAL
+                            even_k.to_string(),
+                            prefill_latency.to_string(),
+                        ])
+                        .compile_options(compile_options_with_occupancy(prefill_occupancy));
+                        let result = unsafe { result.execute(ctx)? };
+                        result.3.unpartition()
                     }
-                    .generics(vec![
-                        attn_bm.to_string(),
-                        attn_bn.to_string(),
-                        self.cfg.head_dim.to_string(),
-                        group.to_string(),
-                        m_eff.to_string(),
-                        1.to_string(), // CAUSAL
-                        even_k.to_string(),
-                        prefill_latency.to_string(),
-                    ])
-                    .compile_options(compile_options_with_occupancy(prefill_occupancy));
-                    let result = unsafe { result.execute(ctx)? };
-                    result.3.unpartition()
                 } else if use_prefill_kernel {
-                    let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
                     let prefill_latency =
                         env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
@@ -6009,29 +6047,66 @@ impl Qwen3Engine {
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
-                    let result = unsafe {
-                        fmha_prefill_causal(
-                            value(q.clone()),
-                            value(k_cache.clone()),
-                            value(v_cache.clone()),
-                            value(out_part),
-                            value(qk_scale),
-                            value(query_group_size),
-                            value(kv_len),
-                            value(*position_start as i32),
-                        )
+                    if safe_kernels_enabled() {
+                        // Safe mapped port: one index per CTA on the
+                        // (q_tiles, heads, 1) logical grid.
+                        let ntb =
+                            (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
+                        let out_part = out
+                            .partition([attn_bm, 1, self.cfg.head_dim])
+                            .map([1, 1, 1], ntb);
+                        let result = unsafe {
+                            fmha_prefill_causal_mapped(
+                                value(out_part),
+                                value(q.clone()),
+                                value(k_cache.clone()),
+                                value(v_cache.clone()),
+                                value(qk_scale),
+                                value(query_group_size),
+                                value(kv_len),
+                                value(*position_start as i32),
+                            )
+                            .generics(vec![
+                                attn_bm.to_string(),
+                                attn_bn.to_string(),
+                                self.cfg.head_dim.to_string(),
+                                1.to_string(), // CAUSAL
+                                even_k.to_string(),
+                                prefill_latency.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ])
+                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                            .execute(ctx)?
+                        };
+                        result.0.unpartition()
+                    } else {
+                        let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
+                        let result = unsafe {
+                            fmha_prefill_causal(
+                                value(q.clone()),
+                                value(k_cache.clone()),
+                                value(v_cache.clone()),
+                                value(out_part),
+                                value(qk_scale),
+                                value(query_group_size),
+                                value(kv_len),
+                                value(*position_start as i32),
+                            )
+                        }
+                        .generics(vec![
+                            attn_bm.to_string(),
+                            attn_bn.to_string(),
+                            self.cfg.head_dim.to_string(),
+                            1.to_string(), // CAUSAL
+                            even_k.to_string(),
+                            prefill_latency.to_string(),
+                        ])
+                        .compile_options(compile_options_with_occupancy(prefill_occupancy));
+                        let result = unsafe { result.execute(ctx)? };
+                        result.3.unpartition()
                     }
-                    .generics(vec![
-                        attn_bm.to_string(),
-                        attn_bn.to_string(),
-                        self.cfg.head_dim.to_string(),
-                        1.to_string(), // CAUSAL
-                        even_k.to_string(),
-                        prefill_latency.to_string(),
-                    ])
-                    .compile_options(compile_options_with_occupancy(prefill_occupancy));
-                    let result = unsafe { result.execute(ctx)? };
-                    result.3.unpartition()
                 } else {
                     let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
                     let result = unsafe {
