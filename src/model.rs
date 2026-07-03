@@ -5,7 +5,8 @@ use crate::kernels::{
     KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_raw_f16, add_rms_norm_f16,
     add_rms_norm_mapped_f16,
     argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
-    flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, fmha_causal,
+    flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_dynpos_mapped_f16,
+    flash_attn_causal_seq_f16, flash_attn_causal_seq_mapped_f16, fmha_causal, fmha_causal_mapped,
     fmha_decode_gqa_split, fmha_decode_gqa_split_mapped, fmha_prefill_causal,
     fmha_prefill_causal_mapped, fmha_prefill_gqa, fmha_prefill_gqa_lpt, fmha_prefill_gqa_mapped,
     gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_dynpos_mapped_f16,
@@ -2956,6 +2957,31 @@ impl Qwen3Engine {
                             .sync_on(stream)
                             .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
                         }
+                    } else if safe_kernels_enabled() {
+                        // Safe mapped port of the decode attention fallback:
+                        // one index per CTA on the (1, attn_heads, 1) grid.
+                        let ntb = attn_heads as u32;
+                        flash_attn_causal_seq_dynpos_mapped_f16(
+                            (&mut bufs.attn_out)
+                                .partition([ATTN_BM_DECODE, 1, head_dim])
+                                .map([1, 1, 1], ntb),
+                            &attn_q,
+                            &*k_cache,
+                            &*v_cache,
+                            qk_scale,
+                            query_group_size,
+                            &position,
+                        )
+                        .generics(vec![
+                            ATTN_BM_DECODE.to_string(),
+                            attn_bn.to_string(),
+                            head_dim.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .sync_on(stream)
+                        .map_err(|e| anyhow::anyhow!("prime attn failed: {e:?}"))?;
                     } else {
                         unsafe {
                             flash_attn_causal_seq_dynpos_f16(
@@ -3584,24 +3610,53 @@ impl Qwen3Engine {
                         let rope_q_view = rope_q_1d
                             .view(&[1, attn_heads, head_dim])
                             .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
-                        s.record(
-                            unsafe {
-                                flash_attn_causal_seq_dynpos_f16(
+                        if safe_kernels_enabled() {
+                            let ntb = attn_heads as u32;
+                            s.record(
+                                flash_attn_causal_seq_dynpos_mapped_f16(
+                                    (&mut bufs.attn_out)
+                                        .partition([ATTN_BM_DECODE, 1, head_dim])
+                                        .map([1, 1, 1], ntb),
                                     &rope_q_view,
                                     &*k_cache,
                                     &*v_cache,
-                                    (&mut bufs.attn_out).partition([ATTN_BM_DECODE, 1, head_dim]),
                                     qk_scale,
                                     query_group_size,
                                     &position,
                                 )
-                            }
-                            .generics(vec![
-                                ATTN_BM_DECODE.to_string(),
-                                attn_bn.to_string(),
-                                head_dim.to_string(),
-                            ]),
-                        )?;
+                                .generics(vec![
+                                    ATTN_BM_DECODE.to_string(),
+                                    attn_bn.to_string(),
+                                    head_dim.to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                ]),
+                            )?;
+                        } else {
+                            s.record(
+                                unsafe {
+                                    flash_attn_causal_seq_dynpos_f16(
+                                        &rope_q_view,
+                                        &*k_cache,
+                                        &*v_cache,
+                                        (&mut bufs.attn_out).partition([
+                                            ATTN_BM_DECODE,
+                                            1,
+                                            head_dim,
+                                        ]),
+                                        qk_scale,
+                                        query_group_size,
+                                        &position,
+                                    )
+                                }
+                                .generics(vec![
+                                    ATTN_BM_DECODE.to_string(),
+                                    attn_bn.to_string(),
+                                    head_dim.to_string(),
+                                ]),
+                            )?;
+                        }
                     }
 
                     // O projection: attn_out → attn_proj
@@ -6107,6 +6162,34 @@ impl Qwen3Engine {
                         let result = unsafe { result.execute(ctx)? };
                         result.3.unpartition()
                     }
+                } else if safe_kernels_enabled() {
+                    // Safe mapped port of the fallback attention kernel.
+                    let ntb = (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
+                    let out_part = out
+                        .partition([attn_bm, 1, self.cfg.head_dim])
+                        .map([1, 1, 1], ntb);
+                    let result = unsafe {
+                        flash_attn_causal_seq_mapped_f16(
+                            value(out_part),
+                            value(q.clone()),
+                            value(k_cache.clone()),
+                            value(v_cache.clone()),
+                            value(qk_scale),
+                            value(query_group_size),
+                            value(kv_len),
+                            value(*position_start as i32),
+                        )
+                        .generics(vec![
+                            attn_bm.to_string(),
+                            attn_bn.to_string(),
+                            self.cfg.head_dim.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .execute(ctx)?
+                    };
+                    result.0.unpartition()
                 } else {
                     let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
                     let result = unsafe {
@@ -6131,6 +6214,37 @@ impl Qwen3Engine {
                 }
             }
             PositionInput::Device(position_start) => {
+                if safe_kernels_enabled() {
+                    // Safe mapped port of the device-position fallback.
+                    let m = q.shape()[0] as usize;
+                    let ntb = (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
+                    let out_part = out
+                        .partition([attn_bm, 1, self.cfg.head_dim])
+                        .map([1, 1, 1], ntb);
+                    let result = unsafe {
+                        fmha_causal_mapped(
+                            value(out_part),
+                            value(q.clone()),
+                            value(k_cache.clone()),
+                            value(v_cache.clone()),
+                            value(f16::from_f32(qk_scale)),
+                            value(query_group_size),
+                            value(position_start.clone()),
+                        )
+                        .generics(vec![
+                            attn_bm.to_string(),
+                            attn_bn.to_string(),
+                            self.cfg.head_dim.to_string(),
+                            1.to_string(),
+                            ((m % attn_bn == 0) as i32).to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .execute(ctx)?
+                    };
+                    return Ok(result.0.unpartition());
+                }
                 let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
                 let result = unsafe {
                     // flash_attn_causal_seq_dynpos_f16_async(
