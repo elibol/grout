@@ -16,42 +16,70 @@ validated on GPU.
 
 ## Ported so far
 
-Built against cutile-rs branch `feat/mapped-partition-rank3-shared-maps`
-(via `[patch.crates-io]` path deps; see Cargo.toml).
+Built against cutile-rs branch `feat/mapped-partition-bounded-pipelined`
+(via `[patch.crates-io]` path deps; see Cargo.toml). That branch added
+the two APIs the previous blockers called for: sub-range mapped
+iteration (`iter_indices_within[_with]`, runtime starts/lengths) and
+bounds-checked pipelined loads (`Partition::load_pipelined::<LATENCY>`).
 
 | kernel | safe variant | paths switched | still legacy |
 |---|---|---|---|
 | `rms_norm_f16` | `rms_norm_mapped_f16` | eager / StepGraph prefill (all per-layer input norms + final norm), warmup | decode-graph prime/capture (layer-0 norm) |
 | `qk_norm_f16` | `qk_norm_mapped_f16` | warmup | unfused decode-graph path (non-default) |
 | `add_rms_norm_f16` | `add_rms_norm_mapped_f16` (dual outputs share one index stream via `iter_indices_with`) | eager / StepGraph prefill (36 calls/step), warmup | — |
+| `kv_cache_update_seq_f16` | `kv_cache_update_seq_mapped_f16` (per-token [1, 1, chunk] tiles; `iter_indices_within_with` bounds the seq axis to the `seq_len` written tokens and brands one index stream for both cache stores) | prefill KV update (`PositionInput::Host`) | — |
+| `kv_cache_update_seq_dynpos_f16` | `kv_cache_update_seq_dynpos_mapped_f16` (sub-range start = position scalar read from device memory) | decode KV update (`PositionInput::Device`), decode-graph prime/record unfused sites | — |
+| `fmha_decode_gqa_split` | `fmha_decode_gqa_split_mapped` — **partially safe**: mapped att store, `load_pipelined` K/V loads, `unchecked_accesses=false`, but the fn stays `unsafe` for the lse output (see blockers) | decode-graph prime/record (default split-KV attention) | — |
+| `splitk_reduce_merge` | `splitk_reduce_merge_mapped` (fully safe; pipelined bounds-checked scratch loads) | decode-graph prime/record | — |
+| `fmha_prefill_causal` | `fmha_prefill_causal_mapped` | default prefill attention (`GROUT_FMHA_PREFILL`) | — |
+| `fmha_prefill_gqa` | `fmha_prefill_gqa_mapped` | GQA prefill attention arm (`GROUT_FMHA_PREFILL_GQA`) | — |
+| `flash_attn_causal_seq_f16` | `flash_attn_causal_seq_mapped_f16` | attend fallback arm (prefill kernels disabled) | — |
+| `flash_attn_causal_seq_dynpos_f16` | `flash_attn_causal_seq_dynpos_mapped_f16` | decode-graph prime/record non-split attention fallback | — |
+| `fmha_causal` | `fmha_causal_mapped` | attend `PositionInput::Device` arm | — |
 
 (`rope_seq*`, `add_2d`, `silu_mul`, `embedding*`, `argmax*`, `gather_row`
 were already safe `fn`s and need no port.)
 
-Design note: the ports use one mapped index per row on a single
-`[1, next_pow2(N)]` tile with tile-IR masking of the overhang (the
-OOB sum-of-squares contribution is zero) — the same schedule the
-`add_rms_norm` BS=2048/4096 sweeps already validated as fastest. This
-means the hidden-size norm tiles change from the legacy BS=512/2048
-loops to a single BS=4096 masked tile; the A/B below is what confirms
-that on sm_120.
+Design notes:
+
+- The norm ports use one mapped index per row on a single
+  `[1, next_pow2(N)]` tile with tile-IR masking of the overhang (the
+  OOB sum-of-squares contribution is zero) — the same schedule the
+  `add_rms_norm` BS=2048/4096 sweeps already validated as fastest. This
+  means the hidden-size norm tiles change from the legacy BS=512/2048
+  loops to a single BS=4096 masked tile; the A/B below is what confirms
+  that on sm_120.
+- The attention ports keep the legacy schedule exactly: map `[1, 1, 1]`
+  with `num_tile_blocks` = the legacy grid size, so each CTA gets one
+  mapped index; tile-block ids become `index.coords()` and the
+  `load_view_tko(..., Some(LATENCY), ...)` pipelined loads become
+  `load_pipelined::<LATENCY>` with identical hints. A/B bar is again
+  no-regression.
+- The KV-cache ports change the store granularity from per-CTA token
+  loops to per-token mapped tiles bounded by `iter_indices_within_with`;
+  `num_tile_blocks` mirrors the legacy CTA counts so occupancy is
+  unchanged.
+- In safe mode the `fmha_lse_partial` scratch is allocated one-row-per-CTA
+  (`[kv_heads * splits, GROUP]`, same memory layout) so the split
+  kernel's legacy per-CTA lse tile view lines up with the mapped 1-D
+  grid; the merge kernel reads it through a `[kv_heads, splits * GROUP]`
+  view.
 
 ## Remaining blockers (cutile API follow-ups)
 
-- **Bounded / sub-grid mapped launches**: `iter_indices()` traverses the
-  full logical partition grid, but `kv_cache_update_seq*` writes only
-  `seq_len` of `max_seq` cache rows (and the decode variant writes one
-  row). Mapped partitions need either a seq-sliced launch view or
-  Dim-bounded index iteration before the KV-cache kernels can port
-  without traversing (or zero-filling) the whole cache.
-- **Safe loads with pipelining hints**: the attention family's loads use
-  `load_view_tko(..., Some(LATENCY), tma)` for software pipelining
-  (measured 4–15% in the tuning notes); the safe `Partition::load` has
-  no latency parameter. Porting `flash_attn_*`/`fmha_*`/`splitk_reduce_merge`
-  without it would trade measured perf for safety — blocked until the
-  safe load carries the hint.
+- **Mixed-shape shared maps**: `iter_indices_with` requires both outputs
+  to share tile and map shapes. `fmha_decode_gqa_split_mapped`'s second
+  output (lse, f32 `[1, GROUP]` rank-2) cannot share the att output's
+  `[1, GROUP, D]` rank-3 index stream, so the kernel keeps an
+  `unsafe fn` signature with a legacy per-CTA tile view for the lse
+  store (everything else — mapped att store, checked pipelined loads,
+  `unchecked_accesses=false` — is on the safe API). A mixed-shape
+  shared-map API would make it fully safe.
+- The LPT/swizzled prefill kernels (`fmha_prefill_gqa_lpt*`) use raw
+  device pointers and a hand-swizzled persistent schedule; they stay
+  legacy until mapped partitions support custom swizzle schedules.
 - The raw-pointer fused kernels (`qk_norm_rope_kv_*_raw`,
-  `add_rms_norm_decode_raw`, `*_lpt*`, `flash_decode.rs`) are Tier 2:
+  `add_rms_norm_decode_raw`, `flash_decode.rs`) are Tier 2:
   A/B against typed equivalents first, then port or delete.
 
 ## A/B protocol (RTX 5090)
