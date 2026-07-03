@@ -3001,6 +3001,252 @@ pub mod kernels {
         out.store(out_3d);
     }
 
+    /// Partially-safe port of fmha_decode_gqa_split: att_out is a mapped
+    /// partition ([1, GROUP, D] tiles on a (kv_heads, NUM_KV_SPLITS, 1)
+    /// logical grid, one index per CTA) so its store is a proved disjoint
+    /// mapped store; K/V loads are bounds-checked `load_pipelined::<LATENCY>`;
+    /// unchecked_accesses=false. The fn stays `unsafe` only because lse_out
+    /// has a different tile shape ([1, GROUP] rank-2) and cannot share
+    /// att_out's index stream — it stays a legacy per-CTA tile view until a
+    /// mixed-shape shared-map API exists. Host contract: att partitioned
+    /// [1, GROUP, D].map([1, 1, 1], kv_heads * NUM_KV_SPLITS); lse scratch
+    /// viewed as [kv_heads * NUM_KV_SPLITS, GROUP] (one row per CTA, same
+    /// row-major order as the att map) and partitioned [1, GROUP].
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (occupancy=1, max_divisibility=16,),
+                         sm_120 = (occupancy=1, max_divisibility=16,),
+                       ))]
+    unsafe fn fmha_decode_gqa_split_mapped<
+        const GROUP: i32,
+        const BN: i32,
+        const D: i32,
+        const NUM_KV_SPLITS: i32,
+        const LATENCY: i32, // pipeline depth for K/V loads; tune per arch
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut att_out: MappedPartitionMut<f16, { [1, GROUP, D] }, MAP_SHAPE>,
+        q: &Tensor<f16, { [-1, GROUP, D] }>,
+        k: &Tensor<f16, { [-1, -1, D] }>,
+        v: &Tensor<f16, { [-1, -1, D] }>,
+        lse_out: &mut Tensor<f32, { [1, GROUP] }>,
+        qk_scale: f16,
+        position_start: &Tensor<u32, { [1] }>,
+    ) {
+        // s_kv = position_start + 1 (number of valid KV tokens at this step).
+        let pos_part = position_start.partition(const_shape![1]);
+        let pos_t_u32: Tile<u32, { [1] }> = pos_part.load([0i32]);
+        let pos_t: Tile<i32, { [1] }> = bitcast(pos_t_u32);
+        let input_pos: i32 = tile_to_scalar(pos_t.reshape(const_shape![]));
+        let s_kv: i32 = input_pos + 1i32;
+
+        // qk_scale is passed in natural-log scale (1/sqrt(d)); convert to
+        // log2 scale once so the inner loop can use exp2 directly.
+        let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
+        let ln2: f32 = tile_to_scalar(log(two));
+        let qk_scale_f32: f32 = convert_scalar(qk_scale);
+        let qk_scale_log2: Tile<f32, { [BN, GROUP] }> =
+            broadcast_scalar(qk_scale_f32 / ln2, const_shape![BN, GROUP]);
+
+        let k_seqlen_tiles: i32 = ceil_div(s_kv, BN);
+        let tiles_per_split: i32 = ceil_div(k_seqlen_tiles, NUM_KV_SPLITS);
+
+        let q_part: Partition<f16, { [1, GROUP, D] }> = q.partition(const_shape![1, GROUP, D]);
+        let k_part = k.partition(const_shape![1, BN, D]);
+        let v_part = v.partition(const_shape![1, BN, D]);
+
+        let transpose_2d: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+            dims: &[1i32, 0i32],
+        };
+        let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+        let offs_n_col: Tile<i32, { [BN, 1] }> = offs_n_tile.reshape(const_shape![BN, 1]);
+        let offs_n_2d: Tile<i32, { [BN, GROUP] }> = offs_n_col.broadcast(const_shape![BN, GROUP]);
+        let s_kv_tile: Tile<i32, { [BN, GROUP] }> = s_kv.broadcast(const_shape![BN, GROUP]);
+        let mask_true: Tile<f32, { [BN, GROUP] }> = constant(0.0f32, const_shape![BN, GROUP]);
+        let mask_false: Tile<f32, { [BN, GROUP] }> = constant(0.0f32, const_shape![BN, GROUP])
+            - constant(1.0e30f32, const_shape![BN, GROUP]);
+        let neg_inf: Tile<f32, { [GROUP, 1] }> =
+            constant(0.0f32, const_shape![GROUP, 1]) - constant(1.0e30f32, const_shape![GROUP, 1]);
+
+        for index in att_out.iter_indices() {
+            let [kv_head_id, split_id, _d0] = index.coords();
+
+            // Split range over KV tiles (in units of BN tokens).
+            let start_tile: i32 = split_id * tiles_per_split;
+            let mut end_tile: i32 = start_tile + tiles_per_split;
+            end_tile = min(end_tile, k_seqlen_tiles);
+
+            let mut m_i: Tile<f32, { [GROUP, 1] }> = neg_inf;
+            let mut l_i: Tile<f32, { [BN, GROUP] }> = constant(1.0f32, const_shape![BN, GROUP]);
+            let mut acc: Tile<f32, { [D, GROUP] }> = constant(0.0f32, const_shape![D, GROUP]);
+
+            // Load Q once: [1, GROUP, D] → [GROUP, D] → [D, GROUP] (transposed).
+            let q_tile: Tile<f16, { [1, GROUP, D] }> = q_part.load([kv_head_id, 0i32, 0i32]);
+            let q_tile: Tile<f16, { [GROUP, D] }> = q_tile.reshape(const_shape![GROUP, D]);
+            let q_trans: Tile<f16, { [D, GROUP] }> = permute(q_tile, transpose_2d);
+
+            for j in start_tile..end_tile {
+                let k_tile: Tile<f16, { [1, BN, D] }> =
+                    k_part.load_pipelined::<LATENCY>([kv_head_id, j, 0i32]);
+                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+
+                // qk = k @ q_T → [BN, GROUP]
+                let mut qk: Tile<f32, { [BN, GROUP] }> = constant(0.0f32, const_shape![BN, GROUP]);
+                qk = mma(k_tile, q_trans, qk);
+
+                // Mask out-of-range KV positions (only matters at the last tile).
+                if j == k_seqlen_tiles - 1i32 {
+                    let j_base: Tile<i32, { [BN, GROUP] }> =
+                        broadcast_scalar(j * BN, const_shape![BN, GROUP]);
+                    let kv_pos: Tile<i32, { [BN, GROUP] }> = j_base + offs_n_2d;
+                    let valid: Tile<bool, { [BN, GROUP] }> = lt_tile(kv_pos, s_kv_tile);
+                    qk = qk + select(valid, mask_true, mask_false);
+                }
+
+                // Convert to log2 scale; transpose so the reduction runs on
+                // the last axis (see fmha_decode_gqa_split for the rationale).
+                qk = qk * qk_scale_log2;
+                let qk_t: Tile<f32, { [GROUP, BN] }> = permute(qk, transpose_2d);
+                let qk_max_raw: Tile<f32, { [GROUP] }> = reduce_max(qk_t, 1i32);
+                let qk_max_col: Tile<f32, { [GROUP, 1] }> =
+                    qk_max_raw.reshape(const_shape![GROUP, 1]);
+                let m_ij: Tile<f32, { [GROUP, 1] }> = max_tile(m_i, qk_max_col);
+                let qk_shifted: Tile<f32, { [GROUP, BN] }> =
+                    qk_t - m_ij.broadcast(const_shape![GROUP, BN]);
+                let p_t: Tile<f32, { [GROUP, BN] }> = exp2(qk_shifted, ftz::Disabled);
+                let p: Tile<f32, { [BN, GROUP] }> = permute(p_t, transpose_2d);
+
+                let alpha: Tile<f32, { [GROUP, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                let alpha_row: Tile<f32, { [1, GROUP] }> = alpha.reshape(const_shape![1, GROUP]);
+                l_i = l_i * alpha_row.broadcast(const_shape![BN, GROUP]) + p;
+                acc = acc * alpha_row.broadcast(const_shape![D, GROUP]);
+
+                let v_tile: Tile<f16, { [1, BN, D] }> =
+                    v_part.load_pipelined::<LATENCY>([kv_head_id, j, 0i32]);
+                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                let v_trans: Tile<f16, { [D, BN] }> = permute(v_tile, transpose_2d);
+
+                // acc[D, GROUP] += v_T[D, BN] @ p[BN, GROUP]
+                let p_f16: Tile<f16, { [BN, GROUP] }> = convert_tile(p);
+                acc = mma(v_trans, p_f16, acc);
+                m_i = m_ij;
+            }
+
+            // Finalize this split: normalize acc by sum(l_i across BN) and
+            // emit LSE = m_i + log2(l_sum) for the merge.
+            let l_i_t: Tile<f32, { [GROUP, BN] }> = permute(l_i, transpose_2d);
+            let l_sum_raw: Tile<f32, { [GROUP] }> = reduce_sum(l_i_t, 1i32);
+            let l_sum: Tile<f32, { [GROUP, 1] }> = l_sum_raw.reshape(const_shape![GROUP, 1]);
+            let eps_g: Tile<f32, { [GROUP, 1] }> = constant(1.0e-8f32, const_shape![GROUP, 1]);
+            let l_sum_safe: Tile<f32, { [GROUP, 1] }> = max_tile(l_sum, eps_g);
+            let l_row: Tile<f32, { [1, GROUP] }> = l_sum_safe.reshape(const_shape![1, GROUP]);
+            let acc_norm: Tile<f32, { [D, GROUP] }> =
+                true_div(acc, l_row.broadcast(const_shape![D, GROUP]));
+
+            let acc_out_t: Tile<f32, { [GROUP, D] }> = permute(acc_norm, transpose_2d);
+            let acc_out_f16: Tile<f16, { [GROUP, D] }> = convert_tile(acc_out_t);
+            let acc_out_3d: Tile<f16, { [1, GROUP, D] }> =
+                acc_out_f16.reshape(const_shape![1, GROUP, D]);
+            att_out.store(acc_out_3d, index);
+
+            // LSE in log2 base: m_i + log2(l_sum). Legacy per-CTA tile-view
+            // store — see the docstring for why lse cannot share the mapped
+            // index stream. The host's [kv_heads * NUM_KV_SPLITS, GROUP]
+            // row-per-CTA view keeps this CTA's slot aligned with `index`.
+            let lse_col: Tile<f32, { [GROUP, 1] }> = m_i + log2(l_sum_safe);
+            let lse_out_tile: Tile<f32, { [1, GROUP] }> = lse_col.reshape(const_shape![1, GROUP]);
+            lse_out.store(lse_out_tile);
+        }
+    }
+
+    /// Safe-API port of splitk_reduce_merge: the output is a mapped partition
+    /// ([1, GROUP, CHUNK_D] tiles on a (kv_heads, 1, D/CHUNK_D) logical grid,
+    /// one index per CTA), scratch loads are bounds-checked
+    /// `load_pipelined::<LATENCY>`, unchecked_accesses=false — no unsafe.
+    /// Host contract: out partitioned [1, GROUP, CHUNK_D].map([1, 1, 1],
+    /// kv_heads * (D / CHUNK_D)).
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (occupancy=4, max_divisibility=16,),
+                         sm_120 = (occupancy=4, max_divisibility=16,),
+                       ))]
+    fn splitk_reduce_merge_mapped<
+        const GROUP: i32,
+        const D: i32,
+        const CHUNK_D: i32,
+        const NUM_KV_SPLITS: i32,
+        const NS_GROUP: i32, // NUM_KV_SPLITS * GROUP, passed explicitly
+        const LATENCY: i32,  // pipeline depth for scratch loads
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut out: MappedPartitionMut<f16, { [1, GROUP, CHUNK_D] }, MAP_SHAPE>,
+        att_partial: &Tensor<f16, { [-1, NS_GROUP, D] }>,
+        lse_partial: &Tensor<f32, { [-1, NS_GROUP] }>,
+    ) {
+        let lse_part: Partition<f32, { [1, NS_GROUP] }> =
+            lse_partial.partition(const_shape![1, NS_GROUP]);
+        let att_part: Partition<f16, { [1, NS_GROUP, CHUNK_D] }> =
+            att_partial.partition(const_shape![1, NS_GROUP, CHUNK_D]);
+        let transpose_2d: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+            dims: &[1i32, 0i32],
+        };
+        let transpose_3d_01: Array<{ [1, 0, 2] }> = Array::<{ [1, 0, 2] }> {
+            dims: &[1i32, 0i32, 2i32],
+        };
+
+        for index in out.iter_indices() {
+            let [kv_head_id, _g, d_chunk_id] = index.coords();
+
+            // This CTA's [1, NS_GROUP] LSE tile → [GROUP, NUM_KV_SPLITS]
+            // (split-major layout; see splitk_reduce_merge).
+            let lse_tile: Tile<f32, { [1, NS_GROUP] }> =
+                lse_part.load_pipelined::<LATENCY>([kv_head_id, 0i32]);
+            let lse_ns_g: Tile<f32, { [NUM_KV_SPLITS, GROUP] }> =
+                lse_tile.reshape(const_shape![NUM_KV_SPLITS, GROUP]);
+            let lse_tile: Tile<f32, { [GROUP, NUM_KV_SPLITS] }> = permute(lse_ns_g, transpose_2d);
+
+            // Per-split weight w_s normalized across splits.
+            let lse_max: Tile<f32, { [GROUP] }> = reduce_max(lse_tile, 1i32);
+            let lse_max_col: Tile<f32, { [GROUP, 1] }> = lse_max.reshape(const_shape![GROUP, 1]);
+            let lse_shifted: Tile<f32, { [GROUP, NUM_KV_SPLITS] }> =
+                lse_tile - lse_max_col.broadcast(const_shape![GROUP, NUM_KV_SPLITS]);
+            let scale_raw: Tile<f32, { [GROUP, NUM_KV_SPLITS] }> =
+                exp2(lse_shifted, ftz::Disabled);
+            let scale_sum: Tile<f32, { [GROUP] }> = reduce_sum(scale_raw, 1i32);
+            let scale_sum_col: Tile<f32, { [GROUP, 1] }> =
+                scale_sum.reshape(const_shape![GROUP, 1]);
+            let eps: Tile<f32, { [GROUP, 1] }> = constant(1.0e-8f32, const_shape![GROUP, 1]);
+            let scale_sum_safe: Tile<f32, { [GROUP, 1] }> = max_tile(scale_sum_col, eps);
+            let weights: Tile<f32, { [GROUP, NUM_KV_SPLITS] }> = true_div(
+                scale_raw,
+                scale_sum_safe.broadcast(const_shape![GROUP, NUM_KV_SPLITS]),
+            );
+
+            // This CTA's CHUNK_D slice → [GROUP, NUM_KV_SPLITS, CHUNK_D].
+            let att_tile: Tile<f16, { [1, NS_GROUP, CHUNK_D] }> =
+                att_part.load_pipelined::<LATENCY>([kv_head_id, 0i32, d_chunk_id]);
+            let att_ns_g_d: Tile<f16, { [NUM_KV_SPLITS, GROUP, CHUNK_D] }> =
+                att_tile.reshape(const_shape![NUM_KV_SPLITS, GROUP, CHUNK_D]);
+            let att_g_ns_d: Tile<f16, { [GROUP, NUM_KV_SPLITS, CHUNK_D] }> =
+                permute(att_ns_g_d, transpose_3d_01);
+            let att_tile: Tile<f32, { [GROUP, NUM_KV_SPLITS, CHUNK_D] }> =
+                convert_tile(att_g_ns_d);
+
+            let w_3d: Tile<f32, { [GROUP, NUM_KV_SPLITS, 1] }> =
+                weights.reshape(const_shape![GROUP, NUM_KV_SPLITS, 1]);
+            let weighted: Tile<f32, { [GROUP, NUM_KV_SPLITS, CHUNK_D] }> =
+                att_tile * w_3d.broadcast(const_shape![GROUP, NUM_KV_SPLITS, CHUNK_D]);
+            let out_tile: Tile<f32, { [GROUP, CHUNK_D] }> = reduce_sum(weighted, 1i32);
+
+            let out_f16: Tile<f16, { [GROUP, CHUNK_D] }> = convert_tile(out_tile);
+            let out_3d: Tile<f16, { [1, GROUP, CHUNK_D] }> =
+                out_f16.reshape(const_shape![1, GROUP, CHUNK_D]);
+            out.store(out_3d, index);
+        }
+    }
+
     /// Persistent RMS norm kernel using raw pointers and grid-stride loop.
     ///
     /// Weight W is loaded once outside the loop and reused across all rows.
@@ -4271,7 +4517,8 @@ pub use kernels::{
     add_vec_f16, argmax_blocks_f16,
     argmax_reduce_blocks_to_u32, embedding_batch_f16, embedding_f16, flash_attn_causal_f16,
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, flash_attn_f16, fmha_causal,
-    fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
+    fmha_decode_gqa_split, fmha_decode_gqa_split_mapped, fmha_prefill_causal, fmha_prefill_gqa,
+    fmha_prefill_gqa_lpt,
     fmha_prefill_gqa_lpt_split, gather_row_f16, gemm_f16, group_gemm_f16_nt_desc,
     kv_cache_update_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_f16, kv_cache_update_seq_mapped_f16,
@@ -4279,5 +4526,5 @@ pub use kernels::{
     qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16,
     rms_norm_f16, rms_norm_mapped_f16, rms_norm_persistent_f16, rope_f16, rope_seq_dynpos_f16,
     rope_seq_f16,
-    silu_mul_2d_f16, silu_mul_vec_f16, splitk_reduce_merge,
+    silu_mul_2d_f16, silu_mul_vec_f16, splitk_reduce_merge, splitk_reduce_merge_mapped,
 };

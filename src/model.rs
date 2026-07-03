@@ -6,13 +6,14 @@ use crate::kernels::{
     add_rms_norm_mapped_f16,
     argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
     flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_f16, fmha_causal,
-    fmha_decode_gqa_split, fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt,
+    fmha_decode_gqa_split, fmha_decode_gqa_split_mapped, fmha_prefill_causal, fmha_prefill_gqa,
+    fmha_prefill_gqa_lpt,
     gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_f16, kv_cache_update_seq_mapped_f16,
     lm_head_argmax_blocks_f16, qk_norm_f16, qk_norm_mapped_f16, qk_norm_rope_kv_decode_raw_f16,
     qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16, rms_norm_f16, rms_norm_mapped_f16,
     rope_seq_dynpos_f16,
-    rope_seq_f16, silu_mul_2d_f16, splitk_reduce_merge,
+    rope_seq_f16, silu_mul_2d_f16, splitk_reduce_merge, splitk_reduce_merge_mapped,
 };
 use crate::loader::WeightLoader;
 use anyhow::{Context, Result, bail, ensure};
@@ -2428,9 +2429,19 @@ impl Qwen3Engine {
             ])
             .sync_on(stream)
             .map_err(|e| anyhow::anyhow!("alloc fmha_att_partial failed: {e:?}"))?,
-            fmha_lse_partial: api::zeros::<f32>(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
-                .sync_on(stream)
-                .map_err(|e| anyhow::anyhow!("alloc fmha_lse_partial failed: {e:?}"))?,
+            // Same memory layout either way; the safe path shapes it one row
+            // per CTA ([kv_heads * splits, GROUP]) so the split kernel's
+            // per-CTA lse tile view lines up with the mapped 1-D grid, and
+            // hands the merge kernel a [kv_heads, splits * GROUP] read view.
+            fmha_lse_partial: if safe_kernels_enabled() {
+                api::zeros::<f32>(&[kv_heads * fmha_num_kv_splits, fmha_group_size])
+                    .sync_on(stream)
+                    .map_err(|e| anyhow::anyhow!("alloc fmha_lse_partial failed: {e:?}"))?
+            } else {
+                api::zeros::<f32>(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
+                    .sync_on(stream)
+                    .map_err(|e| anyhow::anyhow!("alloc fmha_lse_partial failed: {e:?}"))?
+            },
         };
 
         // ── Extract KV caches from layer state (Arc → owned Tensor) ───────
@@ -2831,52 +2842,120 @@ impl Qwen3Engine {
                         let qk_scale_f16 = f16::from_f32(qk_scale);
                         // Per-CTA partition shapes: [1, GROUP, 1, D] for att,
                         // [1, GROUP, 1] for lse. Grid = (kv_heads, num_splits).
-                        unsafe {
-                            fmha_decode_gqa_split(
-                                &rope_q_grouped,
-                                &*k_cache,
-                                &*v_cache,
-                                (&mut bufs.fmha_att_partial).partition([
-                                    1,
-                                    fmha_group_size,
-                                    head_dim,
-                                ]),
-                                (&mut bufs.fmha_lse_partial).partition([1, fmha_group_size]),
-                                qk_scale_f16,
-                                &position,
-                            )
-                        }
-                        .generics(vec![
-                            fmha_group_size.to_string(),
-                            attn_bn.to_string(),
-                            head_dim.to_string(),
-                            fmha_num_kv_splits.to_string(),
-                            fmha_decode_latency.to_string(),
-                        ])
-                        .compile_options(compile_options_with_occupancy(fmha_decode_occupancy))
-                        .sync_on(stream)
-                        .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
-                        unsafe {
-                            splitk_reduce_merge(
+                        if safe_kernels_enabled() {
+                            // Mapped ports: att/out stores are proved disjoint
+                            // mapped stores, K/V loads bounds-checked +
+                            // pipelined; lse keeps the legacy store (mixed
+                            // tile shapes cannot share a map yet).
+                            let split_ntb = (kv_heads * fmha_num_kv_splits) as u32;
+                            // fmha_lse_partial is allocated one-row-per-CTA
+                            // ([kv_heads * splits, GROUP]) in safe mode, so
+                            // the legacy per-CTA lse tile view lines up with
+                            // the mapped 1-D grid.
+                            unsafe {
+                                fmha_decode_gqa_split_mapped(
+                                    (&mut bufs.fmha_att_partial)
+                                        .partition([1, fmha_group_size, head_dim])
+                                        .map([1, 1, 1], split_ntb),
+                                    &rope_q_grouped,
+                                    &*k_cache,
+                                    &*v_cache,
+                                    (&mut bufs.fmha_lse_partial)
+                                        .partition([1, fmha_group_size]),
+                                    qk_scale_f16,
+                                    &position,
+                                )
+                            }
+                            .generics(vec![
+                                fmha_group_size.to_string(),
+                                attn_bn.to_string(),
+                                head_dim.to_string(),
+                                fmha_num_kv_splits.to_string(),
+                                fmha_decode_latency.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ])
+                            .compile_options(compile_options_with_occupancy(
+                                fmha_decode_occupancy,
+                            ))
+                            .sync_on(stream)
+                            .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
+                            let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
+                            let lse_view = bufs
+                                .fmha_lse_partial
+                                .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
+                                .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
+                            splitk_reduce_merge_mapped(
+                                (&mut bufs.attn_out)
+                                    .partition([1, fmha_group_size, fmha_merge_chunk_d])
+                                    .map([1, 1, 1], merge_ntb),
                                 &bufs.fmha_att_partial,
-                                &bufs.fmha_lse_partial,
-                                (&mut bufs.attn_out).partition([
-                                    1,
-                                    fmha_group_size,
-                                    fmha_merge_chunk_d,
-                                ]),
+                                &lse_view,
                             )
+                            .generics(vec![
+                                fmha_group_size.to_string(),
+                                head_dim.to_string(),
+                                fmha_merge_chunk_d.to_string(),
+                                fmha_num_kv_splits.to_string(),
+                                (fmha_num_kv_splits * fmha_group_size).to_string(),
+                                fmha_merge_latency.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ])
+                            .sync_on(stream)
+                            .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
+                        } else {
+                            unsafe {
+                                fmha_decode_gqa_split(
+                                    &rope_q_grouped,
+                                    &*k_cache,
+                                    &*v_cache,
+                                    (&mut bufs.fmha_att_partial).partition([
+                                        1,
+                                        fmha_group_size,
+                                        head_dim,
+                                    ]),
+                                    (&mut bufs.fmha_lse_partial).partition([1, fmha_group_size]),
+                                    qk_scale_f16,
+                                    &position,
+                                )
+                            }
+                            .generics(vec![
+                                fmha_group_size.to_string(),
+                                attn_bn.to_string(),
+                                head_dim.to_string(),
+                                fmha_num_kv_splits.to_string(),
+                                fmha_decode_latency.to_string(),
+                            ])
+                            .compile_options(compile_options_with_occupancy(
+                                fmha_decode_occupancy,
+                            ))
+                            .sync_on(stream)
+                            .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
+                            unsafe {
+                                splitk_reduce_merge(
+                                    &bufs.fmha_att_partial,
+                                    &bufs.fmha_lse_partial,
+                                    (&mut bufs.attn_out).partition([
+                                        1,
+                                        fmha_group_size,
+                                        fmha_merge_chunk_d,
+                                    ]),
+                                )
+                            }
+                            .generics(vec![
+                                fmha_group_size.to_string(),
+                                head_dim.to_string(),
+                                fmha_merge_chunk_d.to_string(),
+                                fmha_num_kv_splits.to_string(),
+                                (fmha_num_kv_splits * fmha_group_size).to_string(),
+                                fmha_merge_latency.to_string(),
+                            ])
+                            .sync_on(stream)
+                            .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
                         }
-                        .generics(vec![
-                            fmha_group_size.to_string(),
-                            head_dim.to_string(),
-                            fmha_merge_chunk_d.to_string(),
-                            fmha_num_kv_splits.to_string(),
-                            (fmha_num_kv_splits * fmha_group_size).to_string(),
-                            fmha_merge_latency.to_string(),
-                        ])
-                        .sync_on(stream)
-                        .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
                     } else {
                         unsafe {
                             flash_attn_causal_seq_dynpos_f16(
@@ -3385,52 +3464,115 @@ impl Qwen3Engine {
                             .view(&[kv_heads, fmha_group_size, head_dim])
                             .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
                         let qk_scale_f16 = f16::from_f32(qk_scale);
-                        s.record(
-                            unsafe {
-                                fmha_decode_gqa_split(
-                                    &rope_q_grouped,
-                                    &*k_cache,
-                                    &*v_cache,
-                                    (&mut bufs.fmha_att_partial).partition([
-                                        1,
-                                        fmha_group_size,
-                                        head_dim,
-                                    ]),
-                                    (&mut bufs.fmha_lse_partial).partition([1, fmha_group_size]),
-                                    qk_scale_f16,
-                                    &position,
-                                )
-                            }
-                            .generics(vec![
-                                fmha_group_size.to_string(),
-                                attn_bn.to_string(),
-                                head_dim.to_string(),
-                                fmha_num_kv_splits.to_string(),
-                                fmha_decode_latency.to_string(),
-                            ])
-                            .compile_options(compile_options_with_occupancy(fmha_decode_occupancy)),
-                        )?;
-                        s.record(
-                            unsafe {
-                                splitk_reduce_merge(
+                        if safe_kernels_enabled() {
+                            let split_ntb = (kv_heads * fmha_num_kv_splits) as u32;
+                            // fmha_lse_partial is allocated one-row-per-CTA
+                            // in safe mode (see DecodeBuffers construction).
+                            s.record(
+                                unsafe {
+                                    fmha_decode_gqa_split_mapped(
+                                        (&mut bufs.fmha_att_partial)
+                                            .partition([1, fmha_group_size, head_dim])
+                                            .map([1, 1, 1], split_ntb),
+                                        &rope_q_grouped,
+                                        &*k_cache,
+                                        &*v_cache,
+                                        (&mut bufs.fmha_lse_partial)
+                                            .partition([1, fmha_group_size]),
+                                        qk_scale_f16,
+                                        &position,
+                                    )
+                                }
+                                .generics(vec![
+                                    fmha_group_size.to_string(),
+                                    attn_bn.to_string(),
+                                    head_dim.to_string(),
+                                    fmha_num_kv_splits.to_string(),
+                                    fmha_decode_latency.to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                ])
+                                .compile_options(compile_options_with_occupancy(
+                                    fmha_decode_occupancy,
+                                )),
+                            )?;
+                            let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
+                            let lse_view = bufs
+                                .fmha_lse_partial
+                                .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
+                                .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
+                            s.record(
+                                splitk_reduce_merge_mapped(
+                                    (&mut bufs.attn_out)
+                                        .partition([1, fmha_group_size, fmha_merge_chunk_d])
+                                        .map([1, 1, 1], merge_ntb),
                                     &bufs.fmha_att_partial,
-                                    &bufs.fmha_lse_partial,
-                                    (&mut bufs.attn_out).partition([
-                                        1,
-                                        fmha_group_size,
-                                        fmha_merge_chunk_d,
-                                    ]),
+                                    &lse_view,
                                 )
-                            }
-                            .generics(vec![
-                                fmha_group_size.to_string(),
-                                head_dim.to_string(),
-                                fmha_merge_chunk_d.to_string(),
-                                fmha_num_kv_splits.to_string(),
-                                (fmha_num_kv_splits * fmha_group_size).to_string(),
-                                fmha_merge_latency.to_string(),
-                            ]),
-                        )?;
+                                .generics(vec![
+                                    fmha_group_size.to_string(),
+                                    head_dim.to_string(),
+                                    fmha_merge_chunk_d.to_string(),
+                                    fmha_num_kv_splits.to_string(),
+                                    (fmha_num_kv_splits * fmha_group_size).to_string(),
+                                    fmha_merge_latency.to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                    "1".to_string(),
+                                ]),
+                            )?;
+                        } else {
+                            s.record(
+                                unsafe {
+                                    fmha_decode_gqa_split(
+                                        &rope_q_grouped,
+                                        &*k_cache,
+                                        &*v_cache,
+                                        (&mut bufs.fmha_att_partial).partition([
+                                            1,
+                                            fmha_group_size,
+                                            head_dim,
+                                        ]),
+                                        (&mut bufs.fmha_lse_partial)
+                                            .partition([1, fmha_group_size]),
+                                        qk_scale_f16,
+                                        &position,
+                                    )
+                                }
+                                .generics(vec![
+                                    fmha_group_size.to_string(),
+                                    attn_bn.to_string(),
+                                    head_dim.to_string(),
+                                    fmha_num_kv_splits.to_string(),
+                                    fmha_decode_latency.to_string(),
+                                ])
+                                .compile_options(compile_options_with_occupancy(
+                                    fmha_decode_occupancy,
+                                )),
+                            )?;
+                            s.record(
+                                unsafe {
+                                    splitk_reduce_merge(
+                                        &bufs.fmha_att_partial,
+                                        &bufs.fmha_lse_partial,
+                                        (&mut bufs.attn_out).partition([
+                                            1,
+                                            fmha_group_size,
+                                            fmha_merge_chunk_d,
+                                        ]),
+                                    )
+                                }
+                                .generics(vec![
+                                    fmha_group_size.to_string(),
+                                    head_dim.to_string(),
+                                    fmha_merge_chunk_d.to_string(),
+                                    fmha_num_kv_splits.to_string(),
+                                    (fmha_num_kv_splits * fmha_group_size).to_string(),
+                                    fmha_merge_latency.to_string(),
+                                ]),
+                            )?;
+                        }
                     } else {
                         let qk_rope_1d_attn = bufs
                             .qk_rope
