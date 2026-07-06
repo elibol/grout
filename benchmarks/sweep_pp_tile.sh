@@ -24,6 +24,13 @@ BENCH_ENVS_DIR="${BENCH_ENVS_DIR:-$GROUT_DIR/../bench_envs}"
 BENCH_CACHE_DIR="${BENCH_CACHE_DIR:-$BENCH_ENVS_DIR/.cache}"
 BENCH_HOME="${BENCH_HOME:-${SCRATCH:-$GROUT_DIR/..}}"
 export HOME="$BENCH_HOME"
+# Repointing HOME breaks rustup's toolchain lookup ($HOME/.rustup), which
+# silently fails the cargo build and lets the sweep run a STALE binary —
+# fatal with the ../cutile-rs path dependency. Keep rustup/cargo anchored
+# to the real home.
+REAL_HOME="$(getent passwd "$(id -u)" | cut -d: -f6)"
+export RUSTUP_HOME="${RUSTUP_HOME:-$REAL_HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$REAL_HOME/.cargo}"
 export PATH="$BENCH_ENVS_DIR/sglang_env/bin:$BENCH_ENVS_DIR/vllm_env/bin:$PATH"
 BENCH_REPS="${BENCH_REPS:-10}"
 WARMUP_REPS="${WARMUP_REPS:-3}"
@@ -50,7 +57,8 @@ else
 fi
 
 echo "Building grout…"
-(cd "$GROUT_DIR" && cargo build --release --features benchmarks --bin grout_bench 2>&1 | tail -2)
+(cd "$GROUT_DIR" && cargo build --release --features benchmarks --bin grout_bench 2>&1 | tail -2) \
+    || { echo "FATAL: grout_bench build failed — refusing to sweep a stale binary." >&2; exit 1; }
 echo
 
 # Generate prompt files at exact token counts via make_prompts.py.
