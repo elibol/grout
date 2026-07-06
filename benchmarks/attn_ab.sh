@@ -42,10 +42,13 @@ OUT="$(mktemp -d)"
 
 # --- measurement helpers ----------------------------------------------------
 
-prefill_attn_us() {  # $1 = "legacy"|"safe"; prints Attention avg_us
+prefill_attn_us() {  # $1 = "legacy"|"safe"|"safe-nohoist"; prints Attention avg_us
     local envs=(GROUT_PROFILE_OPS=1 GROUT_PROFILE_SYNC_OPS=1
                 GROUT_ATTN_BM_PREFILL=32 GROUT_ATTN_BN_PREFILL=16)
     [[ "$1" == legacy ]] && envs+=(GROUT_UNSAFE_KERNELS=1)
+    # Same-binary ablation: keeps every dynamic bounds check in place, so this
+    # arm should reproduce the pre-fix regressed numbers (attribution sanity).
+    [[ "$1" == safe-nohoist ]] && envs+=(CUTILE_DISABLE_CHECK_HOISTING=1)
     # NB: grout pads the value after '=' (e.g. "avg_us=   67.26"), so match
     # across the spaces rather than splitting on fields.
     env "${envs[@]}" "$BENCH" --model "$MODEL_HF" \
@@ -70,12 +73,12 @@ pct() { awk -v l="$1" -v s="$2" 'BEGIN{printf "%+.2f%%", 100*(s-l)/l}'; }
 
 echo
 echo "== 1. prefill Attention avg_us/call (pp=512, BM=32/BN=16, sync-ops) =="
-printf "  %-7s %10s %10s %10s\n" round legacy_us safe_us delta
-PRE_L=(); PRE_S=()
+echo "   (safe-nohoist = CUTILE_DISABLE_CHECK_HOISTING=1, same binary; should"
+echo "    reproduce the pre-fix regression if hoisting is what fixed it)"
+printf "  %-7s %10s %10s %12s %10s %14s\n" round legacy_us safe_us nohoist_us delta nohoist_delta
 for r in $(seq 1 "$ROUNDS"); do
-    l="$(prefill_attn_us legacy)"; s="$(prefill_attn_us safe)"
-    PRE_L+=("$l"); PRE_S+=("$s")
-    printf "  %-7s %10s %10s %10s\n" "$r" "$l" "$s" "$(pct "$l" "$s")"
+    l="$(prefill_attn_us legacy)"; s="$(prefill_attn_us safe)"; nh="$(prefill_attn_us safe-nohoist)"
+    printf "  %-7s %10s %10s %12s %10s %14s\n" "$r" "$l" "$s" "$nh" "$(pct "$l" "$s")" "$(pct "$l" "$nh")"
 done
 
 for TG in $DECODE_TGS; do
