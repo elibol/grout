@@ -82,6 +82,48 @@ Design notes:
   `add_rms_norm_decode_raw`, `flash_decode.rs`) are Tier 2:
   A/B against typed equivalents first, then port or delete.
 
+## Status 2026-07-05: parity at best-vs-best; retune required
+
+After the bounds-check hoisting fix (cutile-rs `feat/mapped-partition-
+bounded-pipelined`), the fixed-shape A/B still showed +26–31% on
+`fmha_prefill_causal_mapped` at legacy's tuned tile (pp=512, BM=32/BN=16).
+Per-arm tile sweeps resolved it: **the two kernel forms have shifted
+optima**, and each form at its own best shape is at statistical parity
+(paired 6-rep, CPU-pinned, pp=512):
+
+| arm @ its own best shape | µs/call |
+|---|---|
+| legacy @ BM=32/BN=32 | 34.6, 35.0 |
+| safe @ BM=32/BN=64 | 35.2, 34.8 |
+
+Mechanism: the mapped (For-region) form spills registers at legacy's
+tuned shape (32/16: ~145 spill ops → 49 µs) but is clean at 32/64 —
+where legacy conversely degrades (41.9); at 64/32 the inversion is
+dramatic (legacy 46.6 vs safe 36.4). Bonus finding: legacy's own tuned
+32/16 was already stale for pp=512 (32/32 gives 36.1).
+
+**Lessons (paper-relevant):**
+- *Tile/hint configs are per-kernel-form, not per-op.* Carrying one
+  form's tuned shapes onto another silently pessimizes it, and a
+  fixed-shape A/B measures the tuning mismatch, not the form's cost.
+  The safety-overhead parity bar must be **best-vs-best** (each form at
+  its own swept optimum).
+- The *magnitude* of the form-sensitivity is likely transient compiler
+  maturity (For-region register allocation; the occupancy-hint-vs-REG
+  question is open on the cutile side) — the durable claim is the
+  evaluation protocol, not the specific shifted optima.
+
+**Retune protocol (per arm):**
+- Prefill: `sweep_pp_tile.sh` per arm — run once with
+  `GROUT_UNSAFE_KERNELS=1` and once without (the flag passes through to
+  the bench) at each pp point; pick per-arm (BM, BN).
+- Decode: `sweep_tg_tile.sh` per arm for `GROUT_ATTN_BN_DECODE` ×
+  `GROUT_FMHA_NUM_KV_SPLITS`, plus `GROUT_FMHA_MERGE_CHUNK_D` and the
+  new `GROUT_FMHA_MERGE_OCCUPANCY` (mapped merge only; try 2 — the
+  For-region merge spills 48 ops under its occupancy=4 entry hint).
+- Then rerun the sweeps below with each arm's own profile; if parity
+  holds across pp/tg, the legacy-deletion gate opens.
+
 ## A/B protocol (RTX 5090)
 
 1. Correctness — identical output text, safe vs legacy:

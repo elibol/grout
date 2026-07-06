@@ -2373,6 +2373,15 @@ impl Qwen3Engine {
             env_usize_or("GROUT_FMHA_MERGE_CHUNK_D", FMHA_MERGE_CHUNK_D_DEFAULT);
         let fmha_merge_latency =
             env_usize_or("GROUT_FMHA_MERGE_LATENCY", FMHA_MERGE_LATENCY_DEFAULT);
+        // Occupancy override for the MAPPED splitk merge only: the For-region
+        // form spills registers under the kernel's occupancy=4 entry hint
+        // (48 spill ops at REG:64), so the per-arm retune sweeps occupancy=2
+        // here. Unset = keep the entry hint (no CompileOptions, preserving
+        // the legacy-identical compile path). Legacy merge is untouched.
+        let fmha_merge_occupancy: Option<usize> = std::env::var("GROUT_FMHA_MERGE_OCCUPANCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|v| *v > 0);
         let qk_rope_latency = env_usize_or("GROUT_QK_ROPE_LATENCY", QK_ROPE_LATENCY_DEFAULT);
         let fuse_qk_rope_kv_decode = env_bool_or("GROUT_FUSED_QK_ROPE_KV_DECODE", true);
         let qk_rope_occupancy =
@@ -2887,7 +2896,7 @@ impl Qwen3Engine {
                                 .fmha_lse_partial
                                 .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
                                 .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
-                            splitk_reduce_merge_mapped(
+                            let merge_inv = splitk_reduce_merge_mapped(
                                 (&mut bufs.attn_out)
                                     .partition([1, fmha_group_size, fmha_merge_chunk_d])
                                     .map([1, 1, 1], merge_ntb),
@@ -2904,9 +2913,16 @@ impl Qwen3Engine {
                                 "1".to_string(),
                                 "1".to_string(),
                                 "1".to_string(),
-                            ])
-                            .sync_on(stream)
-                            .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
+                            ]);
+                            let merge_inv = match fmha_merge_occupancy {
+                                Some(occ) => merge_inv.compile_options(
+                                    CompileOptions::default().occupancy(occ as i32),
+                                ),
+                                None => merge_inv,
+                            };
+                            merge_inv
+                                .sync_on(stream)
+                                .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
                         } else {
                             unsafe {
                                 fmha_decode_gqa_split(
@@ -3528,26 +3544,31 @@ impl Qwen3Engine {
                                 .fmha_lse_partial
                                 .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
                                 .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
-                            s.record(
-                                splitk_reduce_merge_mapped(
-                                    (&mut bufs.attn_out)
-                                        .partition([1, fmha_group_size, fmha_merge_chunk_d])
-                                        .map([1, 1, 1], merge_ntb),
-                                    &bufs.fmha_att_partial,
-                                    &lse_view,
-                                )
-                                .generics(vec![
-                                    fmha_group_size.to_string(),
-                                    head_dim.to_string(),
-                                    fmha_merge_chunk_d.to_string(),
-                                    fmha_num_kv_splits.to_string(),
-                                    (fmha_num_kv_splits * fmha_group_size).to_string(),
-                                    fmha_merge_latency.to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                ]),
-                            )?;
+                            let merge_inv = splitk_reduce_merge_mapped(
+                                (&mut bufs.attn_out)
+                                    .partition([1, fmha_group_size, fmha_merge_chunk_d])
+                                    .map([1, 1, 1], merge_ntb),
+                                &bufs.fmha_att_partial,
+                                &lse_view,
+                            )
+                            .generics(vec![
+                                fmha_group_size.to_string(),
+                                head_dim.to_string(),
+                                fmha_merge_chunk_d.to_string(),
+                                fmha_num_kv_splits.to_string(),
+                                (fmha_num_kv_splits * fmha_group_size).to_string(),
+                                fmha_merge_latency.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ]);
+                            let merge_inv = match fmha_merge_occupancy {
+                                Some(occ) => merge_inv.compile_options(
+                                    CompileOptions::default().occupancy(occ as i32),
+                                ),
+                                None => merge_inv,
+                            };
+                            s.record(merge_inv)?;
                         } else {
                             s.record(
                                 unsafe {
