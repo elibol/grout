@@ -831,190 +831,6 @@ pub mod kernels {
         }
     }
 
-    #[cutile::entry(print_ir=false,
-                       unchecked_accesses=true,
-                       optimization_hints = (
-                         sm_120 = (occupancy=1, max_divisibility=16,),
-                       ))]
-    unsafe fn flash_attn_f16<const BM: i32, const BN: i32, const D: i32>(
-        q: &Tensor<f16, { [-1, -1, D] }>,
-        k: &Tensor<f16, { [-1, -1, D] }>,
-        v: &Tensor<f16, { [-1, -1, D] }>,
-        out: &mut Tensor<f16, { [1, BM, D] }>,
-        qk_scale: f32,
-        query_group_size: i32,
-        kv_len: i32,
-    ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let q_head_idx = pid.0;
-        let q_m_idx = pid.1;
-        let kv_head_idx = q_head_idx / query_group_size;
-        let qk_scale: Tile<f32, { [BM, BN] }> = qk_scale.broadcast(const_shape![BM, BN]);
-
-        let mask_mag: Tile<f32, { [BM, BN] }> = constant(1.0e30f32, const_shape![BM, BN]);
-        let mask_false: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]) - mask_mag;
-        let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-        let offs_n_tile: Tile<i32, { [BM, BN] }> = offs_n_tile
-            .reshape(const_shape![1, BN])
-            .broadcast(const_shape![BM, BN]);
-
-        let max_mag: Tile<f32, { [BM, 1] }> = constant(1.0e30f32, const_shape![BM, 1]);
-        let mut m_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, const_shape![BM, 1]) - max_mag;
-        let mut l_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, const_shape![BM, 1]);
-        let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, const_shape![BM, D]);
-
-        let q_part: Partition<f16, { [1, BM, D] }> = q.partition(const_shape![1, BM, D]);
-        let tq: Tile<f16, { [1, BM, D] }> = q_part.load([q_head_idx, q_m_idx, 0i32]);
-        let tq: Tile<f32, { [BM, D] }> = convert_tile(tq.reshape(const_shape![BM, D]));
-
-        let n: i32 = kv_len;
-        let num_tiles: i32 = (n + BN - 1i32) / BN;
-        let k_part = k.partition(const_shape![1, BN, D]);
-        let v_part = v.partition(const_shape![1, BN, D]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-
-        for j in 0i32..num_tiles {
-            let k_tile: Tile<f16, { [1, BN, D] }> = k_part.load([kv_head_idx, j, 0i32]);
-            let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-            let k_tile_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-            let k_tile_trans: Tile<f32, { [D, BN] }> = convert_tile(k_tile_trans);
-            let qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
-            let qk: Tile<f32, { [BM, BN] }> = mma(tq, k_tile_trans, qk);
-            let qk: Tile<f32, { [BM, BN] }> = qk * qk_scale;
-
-            let offs_n: i32 = j * BN;
-            let offs_n: Tile<i32, { [BM, BN] }> = offs_n.broadcast(const_shape![BM, BN]);
-            let offs_n: Tile<i32, { [BM, BN] }> = offs_n + offs_n_tile;
-            let kv_len_t: Tile<i32, { [BM, BN] }> = n.broadcast(const_shape![BM, BN]);
-            let valid: Tile<bool, { [BM, BN] }> = lt_tile(offs_n, kv_len_t);
-            let qk: Tile<f32, { [BM, BN] }> = select(valid, qk, mask_false);
-
-            let qk_max: Tile<f32, { [BM] }> = reduce_max(qk, 1i32);
-            let qk_max: Tile<f32, { [BM, 1] }> = qk_max.reshape(const_shape![BM, 1]);
-            let m_ij: Tile<f32, { [BM, 1] }> = max_tile(m_i, qk_max);
-            let qk: Tile<f32, { [BM, BN] }> = qk - m_ij.broadcast(const_shape![BM, BN]);
-
-            let p: Tile<f32, { [BM, BN] }> = exp(qk);
-            let l_ij: Tile<f32, { [BM] }> = reduce_sum(p, 1i32);
-            let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
-            let alpha: Tile<f32, { [BM, 1] }> = exp(m_i - m_ij);
-            l_i = fma(l_i, alpha, l_ij, rounding::NearestEven, ftz::Disabled);
-            let alpha: Tile<f32, { [BM, D] }> = alpha.broadcast(const_shape![BM, D]);
-            acc = acc * alpha;
-
-            let v_tile: Tile<f16, { [1, BN, D] }> = v_part.load([kv_head_idx, j, 0i32]);
-            let p_f16: Tile<f16, { [BM, BN] }> = convert_tile(p);
-            let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-            acc = mma(p_f16, v_tile, acc);
-            m_i = m_ij;
-        }
-
-        let eps: Tile<f32, { [BM, 1] }> = constant(1.0e-8f32, const_shape![BM, 1]);
-        let l_i: Tile<f32, { [BM, 1] }> = max_tile(l_i, eps);
-        acc = true_div(acc, l_i.broadcast(const_shape![BM, D]));
-        let acc: Tile<f16, { [1, BM, D] }> = convert_tile(acc.reshape(const_shape![1, BM, D]));
-        out.store(acc);
-    }
-
-    #[cutile::entry(print_ir=false,
-                       unchecked_accesses=true,
-                       optimization_hints = (
-                         sm_120 = (occupancy=1, max_divisibility=16,),
-                       ))]
-    unsafe fn flash_attn_causal_f16<const BM: i32, const BN: i32, const D: i32>(
-        q: &Tensor<f16, { [-1, -1, D] }>,
-        k: &Tensor<f16, { [-1, -1, D] }>,
-        v: &Tensor<f16, { [-1, -1, D] }>,
-        out: &mut Tensor<f16, { [1, BM, D] }>,
-        qk_scale: f32,
-        query_group_size: i32,
-        kv_len: i32,
-        query_start: i32,
-    ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let q_head_idx = pid.0;
-        let q_m_idx = pid.1;
-        let kv_head_idx = q_head_idx / query_group_size;
-        let qk_scale: Tile<f32, { [BM, BN] }> = qk_scale.broadcast(const_shape![BM, BN]);
-
-        let mask_mag: Tile<f32, { [BM, BN] }> = constant(1.0e30f32, const_shape![BM, BN]);
-        let mask_false: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]) - mask_mag;
-        let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-        let offs_n_tile: Tile<i32, { [BM, BN] }> = offs_n_tile
-            .reshape(const_shape![1, BN])
-            .broadcast(const_shape![BM, BN]);
-        let offs_m_base: i32 = query_start + q_m_idx * BM;
-        let offs_m: Tile<i32, { [BM] }> = offs_m_base.broadcast(const_shape![BM]);
-        let m_arange: Tile<i32, { [BM] }> = iota(const_shape![BM]);
-        let offs_m: Tile<i32, { [BM] }> = offs_m + m_arange;
-        let offs_m: Tile<i32, { [BM, BN] }> = offs_m
-            .reshape(const_shape![BM, 1])
-            .broadcast(const_shape![BM, BN]);
-
-        let max_mag: Tile<f32, { [BM, 1] }> = constant(1.0e30f32, const_shape![BM, 1]);
-        let mut m_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, const_shape![BM, 1]) - max_mag;
-        let mut l_i: Tile<f32, { [BM, 1] }> = constant(0.0f32, const_shape![BM, 1]);
-        let mut acc: Tile<f32, { [BM, D] }> = constant(0.0f32, const_shape![BM, D]);
-
-        let q_part: Partition<f16, { [1, BM, D] }> = q.partition(const_shape![1, BM, D]);
-        let tq: Tile<f16, { [1, BM, D] }> = q_part.load([q_head_idx, q_m_idx, 0i32]);
-        let tq: Tile<f32, { [BM, D] }> = convert_tile(tq.reshape(const_shape![BM, D]));
-
-        let n: i32 = kv_len;
-        let num_tiles: i32 = (n + BN - 1i32) / BN;
-        let k_part = k.partition(const_shape![1, BN, D]);
-        let v_part = v.partition(const_shape![1, BN, D]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-
-        for j in 0i32..num_tiles {
-            let k_tile: Tile<f16, { [1, BN, D] }> = k_part.load([kv_head_idx, j, 0i32]);
-            let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-            let k_tile_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-            let k_tile_trans: Tile<f32, { [D, BN] }> = convert_tile(k_tile_trans);
-            let qk: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
-            let qk: Tile<f32, { [BM, BN] }> = mma(tq, k_tile_trans, qk);
-            let qk: Tile<f32, { [BM, BN] }> = qk * qk_scale;
-
-            let offs_n: i32 = j * BN;
-            let offs_n: Tile<i32, { [BM, BN] }> = offs_n.broadcast(const_shape![BM, BN]);
-            let offs_n: Tile<i32, { [BM, BN] }> = offs_n + offs_n_tile;
-            let kv_len_t: Tile<i32, { [BM, BN] }> = n.broadcast(const_shape![BM, BN]);
-            let valid_k: Tile<bool, { [BM, BN] }> = lt_tile(offs_n, kv_len_t);
-            let valid_causal: Tile<bool, { [BM, BN] }> = ge_tile(offs_m, offs_n);
-            let valid: Tile<bool, { [BM, BN] }> = valid_k & valid_causal;
-            let qk: Tile<f32, { [BM, BN] }> = select(valid, qk, mask_false);
-
-            let qk_max: Tile<f32, { [BM] }> = reduce_max(qk, 1i32);
-            let qk_max: Tile<f32, { [BM, 1] }> = qk_max.reshape(const_shape![BM, 1]);
-            let m_ij: Tile<f32, { [BM, 1] }> = max_tile(m_i, qk_max);
-            let qk: Tile<f32, { [BM, BN] }> = qk - m_ij.broadcast(const_shape![BM, BN]);
-
-            let p: Tile<f32, { [BM, BN] }> = exp(qk);
-            let l_ij: Tile<f32, { [BM] }> = reduce_sum(p, 1i32);
-            let l_ij: Tile<f32, { [BM, 1] }> = l_ij.reshape(const_shape![BM, 1]);
-            let alpha: Tile<f32, { [BM, 1] }> = exp(m_i - m_ij);
-            l_i = fma(l_i, alpha, l_ij, rounding::NearestEven, ftz::Disabled);
-            let alpha: Tile<f32, { [BM, D] }> = alpha.broadcast(const_shape![BM, D]);
-            acc = acc * alpha;
-
-            let v_tile: Tile<f16, { [1, BN, D] }> = v_part.load([kv_head_idx, j, 0i32]);
-            let p_f16: Tile<f16, { [BM, BN] }> = convert_tile(p);
-            let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-            acc = mma(p_f16, v_tile, acc);
-            m_i = m_ij;
-        }
-
-        let eps: Tile<f32, { [BM, 1] }> = constant(1.0e-8f32, const_shape![BM, 1]);
-        let l_i: Tile<f32, { [BM, 1] }> = max_tile(l_i, eps);
-        acc = true_div(acc, l_i.broadcast(const_shape![BM, D]));
-        let acc: Tile<f16, { [1, BM, D] }> = convert_tile(acc.reshape(const_shape![1, BM, D]));
-        out.store(acc);
-    }
-
     /// Safe-API port of flash_attn_causal_seq_f16: mapped output tiles
     /// [BM, 1, D] on the (q_tiles, q_heads, 1) logical grid (one index per
     /// CTA), bounds-checked loads, unchecked_accesses=false — no unsafe.
@@ -3021,109 +2837,84 @@ pub mod kernels {
         }
     }
 
-    /// Fused Q+K RoPE: applies rotary position embedding to both Q and K in one launch.
-    ///
-    /// Output is a single [seqlen, num_q_heads + num_kv_heads, D] tensor.
-    /// First num_q_heads heads are rotated Q, remaining are rotated K.
+    /// Safe-API fused Q+K RoPE (port of qk_rope_dynpos_f16): mapped output
+    /// tiles [1, 1, HALF_D] on the (seqlen, num_q_heads + num_kv_heads, 2)
+    /// logical grid, one index per CTA; loads are bounds-checked
+    /// load_pipelined::<LATENCY>. The `head - num_q_heads` load coordinate is
+    /// arithmetic-derived (a named value-lattice case), so its checks stay
+    /// hoisted/in place — the fn itself is fully safe. Host contract: out
+    /// partitioned [1, 1, HALF_D].map([1, 1, 1],
+    /// seqlen * (num_q_heads + num_kv_heads) * 2).
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=true,
+                       unchecked_accesses=false,
                        optimization_hints = (
                          sm_100 = (occupancy=1, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
-    unsafe fn qk_rope_dynpos_f16<const D: i32, const HALF_D: i32, const LATENCY: i32>(
+    fn qk_rope_dynpos_mapped_f16<
+        const D: i32,
+        const HALF_D: i32,
+        const LATENCY: i32,
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut out: MappedPartitionMut<f16, { [1, 1, HALF_D] }, MAP_SHAPE>,
         q: &Tensor<f16, { [-1, -1, D] }>,
         k: &Tensor<f16, { [-1, -1, D] }>,
         inv_freq: &Tensor<f32, { [HALF_D] }>,
         position_start: &Tensor<u32, { [1] }>,
-        out: &mut Tensor<f16, { [1, 1, HALF_D] }>,
         num_q_heads: i32,
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let seq_idx = pid.0;
-        let head_idx = pid.1;
-        let half_idx = pid.2;
-
-        let is_q: bool = head_idx < num_q_heads;
-        let local_head: i32 = if is_q {
-            head_idx
-        } else {
-            head_idx - num_q_heads
-        };
-
-        // Load input from Q or K based on head index. Both halves go through
-        // load_from_view with Some(LATENCY) so the compiler can pipeline the
-        // two cp_async issues with the constant-table loads + cos/sin compute.
         let q_part: Partition<f16, { [1, 1, HALF_D] }> = q.partition(const_shape![1, 1, HALF_D]);
         let k_part: Partition<f16, { [1, 1, HALF_D] }> = k.partition(const_shape![1, 1, HALF_D]);
-
-        let x_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
-            load_view_tko(
-                &q_part,
-                [seq_idx, local_head, 0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(LATENCY),
-                tma::Enabled,
-            )
-        } else {
-            load_view_tko(
-                &k_part,
-                [seq_idx, local_head, 0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(LATENCY),
-                tma::Enabled,
-            )
-        };
-        let x_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
-            load_view_tko(
-                &q_part,
-                [seq_idx, local_head, 1i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(LATENCY),
-                tma::Enabled,
-            )
-        } else {
-            load_view_tko(
-                &k_part,
-                [seq_idx, local_head, 1i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(LATENCY),
-                tma::Enabled,
-            )
-        };
-        let x_lo: Tile<f32, { [1, 1, HALF_D] }> = convert_tile(x_lo_f16);
-        let x_hi: Tile<f32, { [1, 1, HALF_D] }> = convert_tile(x_hi_f16);
-
-        // Position and frequency
         let pos_part = position_start.partition(const_shape![1]);
-        let base_pos_t_u32: Tile<u32, { [1] }> = pos_part.load([0i32]);
-        let base_pos_t: Tile<i32, { [1] }> = bitcast(base_pos_t_u32);
-        let base_pos: i32 = tile_to_scalar(base_pos_t.reshape(const_shape![]));
-
         let inv_part = inv_freq.partition(const_shape![HALF_D]);
-        let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
-        let pos_i: i32 = base_pos + seq_idx;
-        let pos: f32 = convert_scalar(pos_i);
-        let pos: Tile<f32, { [HALF_D] }> = pos.broadcast(const_shape![HALF_D]);
-        let theta: Tile<f32, { [HALF_D] }> = pos * freq;
-        let theta: Tile<f32, { [1, 1, HALF_D] }> = theta.reshape(const_shape![1, 1, HALF_D]);
-        let cos_t = cos(theta);
-        let sin_t = sin(theta);
 
-        // Apply rotation
-        let y_lo: Tile<f32, { [1, 1, HALF_D] }> = x_lo * cos_t - x_hi * sin_t;
-        let y_hi: Tile<f32, { [1, 1, HALF_D] }> = x_hi * cos_t + x_lo * sin_t;
-        let y_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = convert_tile(y_lo);
-        let y_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = convert_tile(y_hi);
+        for index in out.iter_indices() {
+            let [seq_idx, head_idx, half_idx] = index.coords();
+            let is_q: bool = head_idx < num_q_heads;
+            let local_head: i32 = if is_q {
+                head_idx
+            } else {
+                head_idx - num_q_heads
+            };
 
-        if half_idx == 0i32 {
-            out.store(y_lo_f16);
-        } else {
-            out.store(y_hi_f16);
+            let x_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
+                q_part.load_pipelined::<LATENCY>([seq_idx, local_head, 0i32])
+            } else {
+                k_part.load_pipelined::<LATENCY>([seq_idx, local_head, 0i32])
+            };
+            let x_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
+                q_part.load_pipelined::<LATENCY>([seq_idx, local_head, 1i32])
+            } else {
+                k_part.load_pipelined::<LATENCY>([seq_idx, local_head, 1i32])
+            };
+            let x_lo: Tile<f32, { [1, 1, HALF_D] }> = convert_tile(x_lo_f16);
+            let x_hi: Tile<f32, { [1, 1, HALF_D] }> = convert_tile(x_hi_f16);
+
+            let base_pos_t_u32: Tile<u32, { [1] }> = pos_part.load([0i32]);
+            let base_pos_t: Tile<i32, { [1] }> = bitcast(base_pos_t_u32);
+            let base_pos: i32 = tile_to_scalar(base_pos_t.reshape(const_shape![]));
+
+            let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
+            let pos_i: i32 = base_pos + seq_idx;
+            let pos: f32 = convert_scalar(pos_i);
+            let pos: Tile<f32, { [HALF_D] }> = pos.broadcast(const_shape![HALF_D]);
+            let theta: Tile<f32, { [HALF_D] }> = pos * freq;
+            let theta: Tile<f32, { [1, 1, HALF_D] }> = theta.reshape(const_shape![1, 1, HALF_D]);
+            let cos_t = cos(theta);
+            let sin_t = sin(theta);
+
+            let y_lo: Tile<f32, { [1, 1, HALF_D] }> = x_lo * cos_t - x_hi * sin_t;
+            let y_hi: Tile<f32, { [1, 1, HALF_D] }> = x_hi * cos_t + x_lo * sin_t;
+            let y_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = convert_tile(y_lo);
+            let y_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = convert_tile(y_hi);
+
+            let y_f16: Tile<f16, { [1, 1, HALF_D] }> = if half_idx == 0i32 {
+                y_lo_f16
+            } else {
+                y_hi_f16
+            };
+            out.store(y_f16, index);
         }
     }
 
@@ -3749,13 +3540,13 @@ pub mod kernels {
 pub use kernels::{
     add_2d_f16, add_rms_norm_decode_raw_f16, add_rms_norm_mapped_f16, add_vec_f16,
     argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16, embedding_f16,
-    flash_attn_causal_f16, flash_attn_causal_seq_dynpos_mapped_f16,
-    flash_attn_causal_seq_mapped_f16, flash_attn_f16, fmha_causal_mapped,
+     flash_attn_causal_seq_dynpos_mapped_f16,
+    flash_attn_causal_seq_mapped_f16,  fmha_causal_mapped,
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
     fmha_prefill_gqa_lpt_split, fmha_prefill_gqa_mapped, gather_row_f16, gemm_f16,
     group_gemm_f16_nt_desc, kv_cache_update_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge,
     qk_norm_mapped_f16, qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16,
-    qk_rope_dynpos_f16, rms_norm_mapped_f16, rope_f16, rope_seq_dynpos_f16, rope_seq_f16,
+    qk_rope_dynpos_mapped_f16, rms_norm_mapped_f16, rope_f16, rope_seq_dynpos_f16, rope_seq_f16,
     silu_mul_2d_f16, silu_mul_vec_f16, splitk_reduce_merge_mapped,
 };

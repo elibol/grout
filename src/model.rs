@@ -8,7 +8,7 @@ use crate::kernels::{
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
     fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
-    qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16,
+    qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_mapped_f16,
     rms_norm_mapped_f16, rope_seq_dynpos_f16, rope_seq_f16, silu_mul_2d_f16,
     splitk_reduce_merge_mapped,
 };
@@ -1691,19 +1691,25 @@ impl Qwen3Engine {
                 let k = unsafe { api::zeros::<f16>(&[1, kv_heads, head_dim]).execute(ctx)? };
                 let pos = unsafe { api::zeros::<u32>(&[1]).execute(ctx)? };
                 let mut out = alloc_f16_ctx(ctx, &[1, attn_heads + kv_heads, head_dim])?;
+                let ntb = ((attn_heads + kv_heads) * 2) as u32;
                 unsafe {
-                    qk_rope_dynpos_f16(
+                    qk_rope_dynpos_mapped_f16(
+                        (&mut out)
+                            .partition([1, 1, head_dim / 2])
+                            .map([1, 1, 1], ntb),
                         &q,
                         &k,
                         &*self.inv_freq,
                         &pos,
-                        (&mut out).partition([1, 1, head_dim / 2]),
                         attn_heads as i32,
                     )
                     .generics(vec![
                         head_dim.to_string(),
                         (head_dim / 2).to_string(),
                         QK_ROPE_LATENCY_DEFAULT.to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
                     ])
                     .execute(ctx)?
                 };
@@ -2579,20 +2585,24 @@ impl Qwen3Engine {
                             .map_err(|e| anyhow::anyhow!("view failed: {e:?}"))?;
 
                         // Fused Q+K RoPE
-                        unsafe {
-                            qk_rope_dynpos_f16(
-                                &q_norm_3d,
-                                &k_norm_3d,
-                                &*self.inv_freq,
-                                &position,
-                                (&mut bufs.qk_rope).partition([1, 1, head_dim / 2]),
-                                attn_heads as i32,
-                            )
-                        }
+                        let qk_rope_ntb = ((attn_heads + kv_heads) * 2) as u32;
+                        qk_rope_dynpos_mapped_f16(
+                            (&mut bufs.qk_rope)
+                                .partition([1, 1, head_dim / 2])
+                                .map([1, 1, 1], qk_rope_ntb),
+                            &q_norm_3d,
+                            &k_norm_3d,
+                            &*self.inv_freq,
+                            &position,
+                            attn_heads as i32,
+                        )
                         .generics(vec![
                             head_dim.to_string(),
                             (head_dim / 2).to_string(),
                             qk_rope_latency.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
                         ])
                         .compile_options(qk_rope_compile_opts())
                         .sync_on(stream)
@@ -3182,21 +3192,25 @@ impl Qwen3Engine {
                             .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
 
                         // Fused Q+K RoPE
+                        let qk_rope_ntb = ((attn_heads + kv_heads) * 2) as u32;
                         s.record(
-                            unsafe {
-                                qk_rope_dynpos_f16(
-                                    &q_norm_3d,
-                                    &k_norm_3d,
-                                    &*self.inv_freq,
-                                    &position,
-                                    (&mut bufs.qk_rope).partition([1, 1, head_dim / 2]),
-                                    attn_heads as i32,
-                                )
-                            }
+                            qk_rope_dynpos_mapped_f16(
+                                (&mut bufs.qk_rope)
+                                    .partition([1, 1, head_dim / 2])
+                                    .map([1, 1, 1], qk_rope_ntb),
+                                &q_norm_3d,
+                                &k_norm_3d,
+                                &*self.inv_freq,
+                                &position,
+                                attn_heads as i32,
+                            )
                             .generics(vec![
                                 head_dim.to_string(),
                                 (head_dim / 2).to_string(),
                                 qk_rope_latency.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
                             ])
                             .compile_options(qk_rope_compile_opts()),
                         )?;
