@@ -300,14 +300,6 @@ pub mod kernels {
     /// map [1, 1], num_tile_blocks = rows, BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
-                       // Row coordinate is cross-tensor (no by-construction
-                       // proof exists); the declared equality discharges it at
-                       // JIT time. Column axes discharge by construction
-                       // (literal-0 coordinate vs static N), so no axis-1
-                       // facts are needed.
-                       preconditions = (
-                           dim(out, 0) == dim(x, 0),
-                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -319,16 +311,19 @@ pub mod kernels {
         eps: f32,
     ) {
         let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
-        let x_part: Partition<f16, { [1, BLOCK_SIZE] }> = x.partition(tile_shape);
+        // Dim + with_bounds (persistent-gemm style): tie x's index space to
+        // out's grid dims and load through proof-carrying coords minted from
+        // out's map. The column dim is redundant (the grid has exactly one
+        // column tile since BLOCK_SIZE >= N) but binding it keeps the coord
+        // fully branded.
+        let rows = num_tiles(&out, 0);
+        let cols = num_tiles(&out, 1);
+        let x_part = x.partition(tile_shape).with_bounds((rows, cols));
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
-
+        
         for index in out.iter_indices() {
-            // Axis 1 has exactly one tile by construction (BLOCK_SIZE >= N),
-            // so the column coordinate is the literal 0: the checker
-            // discharges those axes at JIT time against the static N dim.
-            // The row check stays a single per-CTA runtime check.
-            let (row, _j) = index.components();
-            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, 0i32]);
+            let (row, j) = index.components();
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load(coord((row, j)));
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
 
             let sq: Tile<f32, { [1, BLOCK_SIZE] }> = tx * tx;
