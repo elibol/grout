@@ -2588,14 +2588,6 @@ pub mod kernels {
     /// identical shapes; BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
-                       // Cross-tensor row coordinates discharge via the
-                       // declared equalities; columns discharge by
-                       // construction (literal-0 vs static N). residual_out
-                       // shares out's index stream (brand-proven stores).
-                       preconditions = (
-                           dim(out, 0) == dim(residual, 0),
-                           dim(out, 0) == dim(x, 0),
-                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -2609,17 +2601,19 @@ pub mod kernels {
         eps: f32,
     ) {
         let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
-        let residual_part: Partition<f16, { [1, BLOCK_SIZE] }> = residual.partition(tile_shape);
-        let x_part: Partition<f16, { [1, BLOCK_SIZE] }> = x.partition(tile_shape);
+        // Dim + with_bounds (persistent-gemm style), as in rms_norm_mapped:
+        // both inputs' index spaces are tied to out's grid dims; loads take
+        // proof-carrying coords minted from the shared index stream.
+        let rows = num_tiles(&out, 0);
+        let cols = num_tiles(&out, 1);
+        let residual_part = residual.partition(tile_shape).with_bounds((rows, cols));
+        let x_part = x.partition(tile_shape).with_bounds((rows, cols));
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
 
         for index in out.iter_indices_with(&residual_out) {
-            // Column coordinates are the literal 0 (single tile: BLOCK_SIZE
-            // >= N), discharged at JIT time against the static N dim; the
-            // two row checks stay per-CTA runtime checks.
-            let (row, _j) = index.components();
-            let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load([row, 0i32]);
-            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, 0i32]);
+            let (row, j) = index.components();
+            let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load(coord((row, j)));
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load(coord((row, j)));
             let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([0i32]).reshape(tile_shape);
             let tr: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tr_f16);
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);

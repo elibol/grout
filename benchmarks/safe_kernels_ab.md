@@ -83,24 +83,28 @@ preserves via the minimal declared equalities below.
 The kernels give the compiler enough information to place checks at
 JIT time rather than runtime:
 
-1. **Prefer JIT-time checks.** By construction where the structure
-   allows it — correctness-preserving rewrites (the norms' structurally
-   constant column coordinates load with the literal `0`, discharged
-   against the static N dim), `Dim`/`with_bounds`/`coord` branding, and
-   same-view origins (an index minted from the tensor it accesses
-   discharges for free; extending `with_bounds` past rank 2 would bring
-   the attention KV loops here). Where no by-construction proof exists —
-   cross-tensor coordinates relating independently allocated extents —
-   a minimal declared dim-equality (launch-validated by the generated
-   host launcher) provides the JIT-time discharge instead.
+1. **Prefer JIT-time checks.** By construction first: the norm kernels
+   tie their inputs' index spaces to the output's grid dims
+   (`num_tiles(&out, ..)` + `with_bounds`) and load through
+   proof-carrying coords minted from the mapped index stream — the
+   persistent-gemm pattern — which discharges their cross-tensor
+   coordinates with zero declared facts (measured 1/0/0
+   discharged/hoisted/in-place on device, at perf parity in paired
+   runs). Static shapes, literal coordinates, and same-view origins
+   discharge likewise. Where construction is out of reach — currently
+   the rank-3 loads in the splitk merge, since `with_bounds`/`coord`
+   are rank-2 — a minimal declared dim-equality (launch-validated by
+   the generated host launcher) provides the JIT-time discharge
+   instead. Extending `with_bounds` past rank 2 would retire those
+   facts and bring the attention KV loops under construction too.
 2. **Runtime checks are a last resort**, aggressively optimized and
    hoisted out of hot loops (loop-invariant and affine-induction
    indices are checked once in the loop preheader).
 
 Current declared-equality footprint, kept minimal by rule 1's
-preference order: rms_norm 1 fact, add_rms_norm 2, splitk merge 3 —
-each covering exactly the cross-tensor coordinates with no structural
-proof.
+preference order: rms_norm 0, add_rms_norm 0 (both fully
+by-construction), splitk merge 3 (rank-3 loads, beyond
+`with_bounds`' current rank-2 reach).
 
 ## Verification boundary
 
