@@ -303,6 +303,13 @@ pub mod kernels {
     /// map [1, 1], num_tile_blocks = rows, BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
+                       // Declared host contract: lets the checker discharge the
+                       // branded row coordinate against x's runtime row count
+                       // (pass-through coords; equality launch-validated by the
+                       // generated host launcher).
+                       preconditions = (
+                           dim(out, 0) == dim(x, 0),
+                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -3831,6 +3838,11 @@ pub mod kernels {
     /// kv_heads * (D / CHUNK_D)).
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
+                       preconditions = (
+                           dim(out, 0) == dim(att_partial, 0),
+                           dim(out, 0) == dim(lse_partial, 0),
+                           dim(out, 2) == dim(att_partial, 2),
+                       ),
                        optimization_hints = (
                          sm_100 = (occupancy=4, max_divisibility=16,),
                          sm_120 = (occupancy=4, max_divisibility=16,),
@@ -4047,6 +4059,13 @@ pub mod kernels {
     /// identical shapes; BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
+                       // Declared host contract (pass-through row coordinate);
+                       // residual_out shares out's index stream, so its stores
+                       // are brand-proven and need no precondition.
+                       preconditions = (
+                           dim(out, 0) == dim(residual, 0),
+                           dim(out, 0) == dim(x, 0),
+                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
