@@ -306,6 +306,8 @@ pub mod kernels {
                        // generated host launcher).
                        preconditions = (
                            dim(out, 0) == dim(x, 0),
+                           dim(out, 1) == dim(x, 1),
+                           dim(out, 1) == dim(w, 0),
                        ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
@@ -2587,6 +2589,9 @@ pub mod kernels {
                        preconditions = (
                            dim(out, 0) == dim(residual, 0),
                            dim(out, 0) == dim(x, 0),
+                           dim(out, 1) == dim(residual, 1),
+                           dim(out, 1) == dim(x, 1),
+                           dim(out, 1) == dim(w, 0),
                        ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
