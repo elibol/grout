@@ -179,11 +179,16 @@ if [[ -f "$GROUT_DIR/Cargo.toml" ]]; then
     # (≥512) is SM-saturated so wider BM amortizes MMA setup.
     pp_to_prefill_tile() {
         # echoes "BM BN"
+        # 2026-07-05 per-arm tile sweep (both legacy and safe mapped kernels
+        # agree): BM=64 rows win at pp>=512 for both arms (legacy best 64/32
+        # = 14.36 ms, safe best 64/32 = 14.51 at pp=512; 64/64 within noise
+        # for both). The old 32/16 was stale for both arms. pp>=2048 cells
+        # are overridden by the per-pp LPT profile in the sm120 wrapper.
         local pp="$1"
         if (( pp < 512 )); then
             echo "16 32"
         else
-            echo "32 16"
+            echo "64 32"
         fi
     }
 
