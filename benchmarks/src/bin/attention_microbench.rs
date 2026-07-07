@@ -10,8 +10,8 @@ use cutile::tile_kernel::TileKernel;
 use cutile::{api, core::f16};
 
 use grout::kernels::{
-    fmha_prefill_causal, fmha_prefill_gqa, fmha_prefill_gqa_lpt, fmha_prefill_gqa_lpt_split,
-    prefill_splitk_reduce_merge,
+    fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt, fmha_prefill_gqa_lpt_split,
+    fmha_prefill_gqa_mapped, prefill_splitk_reduce_merge,
 };
 
 #[derive(Parser, Debug)]
@@ -554,19 +554,25 @@ fn launch_attention(
             .map_err(|e| anyhow!("fmha_prefill_gqa_lpt failed: {e:?}"))?;
             return Ok(out);
         }
-        let out_part = out.partition([args.bm, group, args.head_dim]);
-        let result = unsafe {
-            fmha_prefill_gqa(
-                value(q.clone()),
-                value(k.clone()),
-                value(v.clone()),
-                value(out_part),
-                value(qk_scale),
-                value(qgs as i32),
-                value(args.q_len as i32),
-                value(0i32),
-            )
-        }
+        ensure!(
+            args.q_heads % group == 0,
+            "group must divide q_heads={}",
+            args.q_heads
+        );
+        let ntb = (args.q_len.div_ceil(args.bm) * (args.q_heads / group)) as u32;
+        let out_part = out
+            .partition([args.bm, group, args.head_dim])
+            .map([1, 1, 1], ntb);
+        let result = fmha_prefill_gqa_mapped(
+            value(out_part),
+            value(q.clone()),
+            value(k.clone()),
+            value(v.clone()),
+            value(qk_scale),
+            value(qgs as i32),
+            value(args.q_len as i32),
+            value(0i32),
+        )
         .generics(vec![
             args.bm.to_string(),
             args.bn.to_string(),
@@ -576,27 +582,29 @@ fn launch_attention(
             1.to_string(),
             even_k.to_string(),
             args.latency.to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "1".to_string(),
         ])
         .compile_options(
             cutile::tile_kernel::CompileOptions::default().occupancy(args.occupancy as i32),
         )
         .sync_on(stream)
-        .map_err(|e| anyhow!("fmha_prefill_gqa failed: {e:?}"))?;
-        Ok(result.3.unpartition())
+        .map_err(|e| anyhow!("fmha_prefill_gqa_mapped failed: {e:?}"))?;
+        Ok(result.0.unpartition())
     } else {
-        let out_part = out.partition([args.bm, 1, args.head_dim]);
-        let result = unsafe {
-            fmha_prefill_causal(
-                value(q.clone()),
-                value(k.clone()),
-                value(v.clone()),
-                value(out_part),
-                value(qk_scale),
-                value(qgs as i32),
-                value(args.q_len as i32),
-                value(0i32),
-            )
-        }
+        let ntb = (args.q_len.div_ceil(args.bm) * args.q_heads) as u32;
+        let out_part = out.partition([args.bm, 1, args.head_dim]).map([1, 1, 1], ntb);
+        let result = fmha_prefill_causal_mapped(
+            value(out_part),
+            value(q.clone()),
+            value(k.clone()),
+            value(v.clone()),
+            value(qk_scale),
+            value(qgs as i32),
+            value(args.q_len as i32),
+            value(0i32),
+        )
         .generics(vec![
             args.bm.to_string(),
             args.bn.to_string(),
@@ -604,13 +612,16 @@ fn launch_attention(
             1.to_string(),
             even_k.to_string(),
             args.latency.to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "1".to_string(),
         ])
         .compile_options(
             cutile::tile_kernel::CompileOptions::default().occupancy(args.occupancy as i32),
         )
         .sync_on(stream)
-        .map_err(|e| anyhow!("fmha_prefill_causal failed: {e:?}"))?;
-        Ok(result.3.unpartition())
+        .map_err(|e| anyhow!("fmha_prefill_causal_mapped failed: {e:?}"))?;
+        Ok(result.0.unpartition())
     }
 }
 

@@ -2,19 +2,15 @@ use crate::config::{GenerationConfig, Qwen3Config};
 use crate::cublas;
 use crate::flash_decode::attention_decode_kernel_grouped;
 use crate::kernels::{
-    KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_raw_f16, add_rms_norm_f16,
-    add_rms_norm_mapped_f16,
-    argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
-    flash_attn_causal_seq_dynpos_f16, flash_attn_causal_seq_dynpos_mapped_f16,
-    flash_attn_causal_seq_f16, flash_attn_causal_seq_mapped_f16, fmha_causal, fmha_causal_mapped,
-    fmha_decode_gqa_split, fmha_decode_gqa_split_mapped, fmha_prefill_causal,
-    fmha_prefill_causal_mapped, fmha_prefill_gqa, fmha_prefill_gqa_lpt, fmha_prefill_gqa_mapped,
-    gather_row_f16, kv_cache_update_seq_dynpos_f16, kv_cache_update_seq_dynpos_mapped_f16,
-    kv_cache_update_seq_f16, kv_cache_update_seq_mapped_f16,
-    lm_head_argmax_blocks_f16, qk_norm_f16, qk_norm_mapped_f16, qk_norm_rope_kv_decode_raw_f16,
-    qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16, rms_norm_f16, rms_norm_mapped_f16,
-    rope_seq_dynpos_f16,
-    rope_seq_f16, silu_mul_2d_f16, splitk_reduce_merge, splitk_reduce_merge_mapped,
+    KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_raw_f16,
+    add_rms_norm_mapped_f16, argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
+    flash_attn_causal_seq_dynpos_mapped_f16, flash_attn_causal_seq_mapped_f16, fmha_causal_mapped,
+    fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
+    fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
+    kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
+    qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_f16,
+    rms_norm_mapped_f16, rope_seq_dynpos_f16, rope_seq_f16, silu_mul_2d_f16,
+    splitk_reduce_merge_mapped,
 };
 use crate::loader::WeightLoader;
 use anyhow::{Context, Result, bail, ensure};
@@ -74,7 +70,7 @@ impl<F: FnOnce(&ExecutionContext) -> Result<(), DeviceError> + Send> std::future
 // Structurally capped at head_dim — kernel fails if BLOCK_SIZE > D. Not
 // independently tunable.
 const VEC_BLOCK: usize = 128;
-// BM_S: seq_len chunking for kv_cache_update_seq_f16. Grid becomes
+// BM_S: seq_len chunking for kv_cache_update_seq_mapped_f16. Grid becomes
 // (num_kv_heads, ceil(seq_len/BM_S), 1). Pre-refactor this kernel ran
 // on (num_kv_heads, 1, 1) = 8 CTAs with a seq_len-iteration inner loop,
 // taking 31 ms at pp=2048. BM_S=16 gives 1024 CTAs at pp=2048, tuned
@@ -89,25 +85,6 @@ const KV_CACHE_BM_S_DEFAULT: usize = 16;
 // Tunable via GROUT_EMBED_BLOCK.
 const EMBED_BLOCK: usize = 1024;
 const POINTWISE_BLOCK: usize = 1024;
-// BLOCK_SIZE for the plain `rms_norm_f16` and `qk_norm_f16` kernels
-// when invoked at small N (head_dim = 128 for Q/K norm). BLOCK_SIZE
-// must be ≤ N or cutile's bounded-assume check fails at JIT time.
-// 128 divides both 128 (head_dim) and 2560 (hidden_size) cleanly.
-const RMS_BLOCK: usize = 128;
-// BLOCK_SIZE for plain `rms_norm_f16` at N=hidden_size=2560. Same
-// "512 is the tuned sweet spot" argument as add_rms_norm_f16 — closes
-// BS=128's perf gap to the cutile rmsnorm reference benchmark. 512
-// divides 2560 exactly (num_tiles=5, no overhang).
-const RMS_BLOCK_HIDDEN: usize = 512;
-// Default BLOCK_SIZE for the generic `add_rms_norm_f16` path. Picked
-// empirically via the BLOCK_SIZE × max_divisibility sweep on 2026-04-20
-// (Qwen3-4B, N=hidden_size=2560, max_divisibility=8). Winner:
-//   BS=2048: kernel median 2016 ns, decode 154.9 t/s (best end-to-end)
-//   vs BS=128 (old default): kernel median 2272 ns, decode 151.1 t/s
-// At BS=2048, num_tiles=ceil(2560/2048)=2 with a partial last tile
-// (512 valid / 1536 overhang). Tile IR masks the overhang on
-// load/store; the OOB sum-of-squares contribution is zero.
-const ADD_RMS_BLOCK: usize = 2048;
 // Decode CUDA graphs use `add_rms_norm_decode_raw_f16`, a contiguous raw
 // pointer variant. The 2026-04-29 sm_120 retry found BS=4096 best for that
 // kernel (median 1376 ns vs 3232 ns for the old generic decode path).
@@ -138,7 +115,7 @@ const ATTN_BN_DECODE: usize = 32;
 // splits) and very long kv prefers more (32 at pp=8192); the paper sweep
 // picks those per-pp via GROUT_FMHA_NUM_KV_SPLITS.
 const FMHA_NUM_KV_SPLITS_DEFAULT: usize = 16;
-// Software-pipelining depth + occupancy for fmha_decode_gqa_split.
+// Software-pipelining depth + occupancy for fmha_decode_gqa_split_mapped.
 // Tuned via 2D (LAT × OCC) sweep on sm_120 at pp=18 tg=128:
 //   - Whole grid within 1.4% (compute-bound, like prefill).
 //   - Minimum at (LAT=4, OCC=2) = 764.8 ms, vs default (LAT=2, OCC=1)
@@ -147,14 +124,14 @@ const FMHA_NUM_KV_SPLITS_DEFAULT: usize = 16;
 // Override with GROUT_FMHA_DECODE_LATENCY / GROUT_FMHA_DECODE_OCCUPANCY.
 const FMHA_DECODE_LATENCY_DEFAULT: usize = 4;
 const FMHA_DECODE_OCCUPANCY_DEFAULT: usize = 2;
-// CHUNK_D for splitk_reduce_merge's expanded grid. Grid becomes
+// CHUNK_D for splitk_reduce_merge_mapped's expanded grid. Grid becomes
 // (kv_heads, 1, D/CHUNK_D). At head_dim=128: CHUNK_D=16 → 8 D-chunks
 // per kv_head × 8 kv_heads = 64 CTAs (matches Blackwell's 64 SMs).
 // Previously grid was (kv_heads, 1, 1) = 8 CTAs → 12.5% SM
 // utilization. Override with GROUT_FMHA_MERGE_CHUNK_D. Must divide
 // head_dim.
 const FMHA_MERGE_CHUNK_D_DEFAULT: usize = 16;
-// Pipeline depth for load_from_view inside splitk_reduce_merge.
+// Pipeline depth for load_from_view inside splitk_reduce_merge_mapped.
 // Override via GROUT_FMHA_MERGE_LATENCY.
 const FMHA_MERGE_LATENCY_DEFAULT: usize = 2;
 // Pipeline depth + occupancy + CTA clustering for qk_rope_dynpos_f16.
@@ -182,7 +159,7 @@ const KV_CACHE_DYN_CHUNK_D_DEFAULT: usize = 32;
 // also set per-architecture overrides for long prompt lengths.
 const ATTN_BM_PREFILL: usize = 16;
 const ATTN_BN_PREFILL: usize = 32;
-// Software-pipelining depth and occupancy for fmha_prefill_causal. Tuned
+// Software-pipelining depth and occupancy for fmha_prefill_causal_mapped. Tuned
 // via 2D sweep on sm_120 (RTX 5090) at pp=2048 tg=36:
 //   - OCC=2 wins; OCC=1 is 4-15% slower, OCC=4 is ~2× slower
 //     (SMEM/register thrashing).
@@ -206,14 +183,6 @@ fn env_usize_or(var: &str, default: usize) -> usize {
 
 fn env_bool_or(var: &str, default: bool) -> bool {
     std::env::var(var).ok().map(|v| v != "0").unwrap_or(default)
-}
-
-/// Safe mapped-partition kernels (bounds-checked loads, disjoint mapped
-/// stores; see cutile §5.1 safety-overhead results) are the default. Set
-/// GROUT_UNSAFE_KERNELS=1 to fall back to the legacy unsafe kernels for
-/// per-kernel A/B validation.
-fn safe_kernels_enabled() -> bool {
-    std::env::var("GROUT_UNSAFE_KERNELS").ok().as_deref() != Some("1")
 }
 
 fn env_usize_hint_or(var: &str, default: usize) -> Option<usize> {
@@ -525,8 +494,8 @@ struct DecodeBuffers {
     argmax_block_max: Tensor<f32>, // [num_blocks] — stage-1 argmax per-block max
     argmax_block_idx: Tensor<u32>, // [num_blocks] — stage-1 argmax per-block argmax
     // Split-K decode attention scratch. Default ON as of 2026-04-20:
-    // fmha_decode_gqa_split + splitk_reduce_merge replace the old
-    // flash_attn_causal_seq_dynpos_f16 path. Opt out with GROUT_FMHA_SPLIT_KV=0.
+    // fmha_decode_gqa_split_mapped + splitk_reduce_merge_mapped replace the
+    // old decode attention fallback. Opt out with GROUT_FMHA_SPLIT_KV=0.
     // [kv_heads, NUM_KV_SPLITS * group, head_dim] f16 per-split partial acc.
     fmha_att_partial: Tensor<f16>,
     // [kv_heads, NUM_KV_SPLITS * group] f32 per-split LSE.
@@ -1303,8 +1272,6 @@ pub struct Qwen3Engine {
     top_p: f32,
     use_chat_template: bool,
     use_device_argmax: bool,
-    add_rms_block: usize,
-    rms_hidden_block: usize,
     profile_enabled: bool,
     active_profile: Option<RunProfile>,
     kernel_warm_registry: KernelWarmRegistry,
@@ -1352,13 +1319,6 @@ impl Qwen3Engine {
         // Device argmax is default-on (avoids 300 KB logits D2H copy per
         // decode token). Use --host-argmax on the CLI to opt out.
         let use_device_argmax = true;
-        let add_rms_block = env_usize_or("GROUT_ADD_RMS_BLOCK", ADD_RMS_BLOCK);
-        let rms_hidden_candidate = env_usize_or("GROUT_RMS_HIDDEN_BLOCK", RMS_BLOCK_HIDDEN);
-        let rms_hidden_block = if rms_hidden_candidate.is_power_of_two() {
-            rms_hidden_candidate
-        } else {
-            RMS_BLOCK_HIDDEN
-        };
         let profile_enabled = std::env::var("GROUT_PROFILE")
             .ok()
             .map(|v| v != "0")
@@ -1477,8 +1437,6 @@ impl Qwen3Engine {
             top_p,
             use_chat_template,
             use_device_argmax,
-            add_rms_block,
-            rms_hidden_block,
             profile_enabled,
             active_profile: None,
             kernel_warm_registry: KernelWarmRegistry::default(),
@@ -1704,42 +1662,26 @@ impl Qwen3Engine {
                 let q_w = self.layers[0].weights.q_norm.clone();
                 let k_w = self.layers[0].weights.k_norm.clone();
                 let mut out = alloc_f16_ctx(ctx, &[attn_heads + kv_heads, head_dim])?;
-                if safe_kernels_enabled() {
-                    let rows = attn_heads + kv_heads;
-                    let bs = head_dim.next_power_of_two();
-                    unsafe {
-                        qk_norm_mapped_f16(
-                            (&mut out).partition([1, bs]).map([1, 1], rows as u32),
-                            &q,
-                            &k,
-                            &*q_w,
-                            &*k_w,
-                            self.cfg.rms_norm_eps,
-                            attn_heads as i32,
-                        )
-                        .generics(vec![
-                            head_dim.to_string(),
-                            bs.to_string(),
-                            "1".to_string(),
-                            "1".to_string(),
-                        ])
-                        .execute(ctx)?
-                    };
-                } else {
-                    unsafe {
-                        qk_norm_f16(
-                            &q,
-                            &k,
-                            &*q_w,
-                            &*k_w,
-                            (&mut out).partition([1, head_dim]),
-                            self.cfg.rms_norm_eps,
-                            attn_heads as i32,
-                        )
-                        .generics(vec![head_dim.to_string(), RMS_BLOCK.to_string()])
-                        .execute(ctx)?
-                    };
-                }
+                let rows = attn_heads + kv_heads;
+                let bs = head_dim.next_power_of_two();
+                unsafe {
+                    qk_norm_mapped_f16(
+                        (&mut out).partition([1, bs]).map([1, 1], rows as u32),
+                        &q,
+                        &k,
+                        &*q_w,
+                        &*k_w,
+                        self.cfg.rms_norm_eps,
+                        attn_heads as i32,
+                    )
+                    .generics(vec![
+                        head_dim.to_string(),
+                        bs.to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
+                    ])
+                    .execute(ctx)?
+                };
             }
             KernelKind::QkRope => {
                 let attn_heads = self.cfg.num_attention_heads;
@@ -2308,9 +2250,7 @@ impl Qwen3Engine {
         let query_group_size = self.cfg.num_kv_groups() as i32;
         let attn_bn = env_usize_or("GROUT_ATTN_BN_DECODE", ATTN_BN_DECODE);
         let use_flash_decode = env_bool_or("GROUT_FLASH_DECODE", false);
-        // BLOCK_SIZE ablation knob for decode add_rms_norm only (plain
-        // rms_norm_f16 and qk_norm_f16 stay at RMS_BLOCK because they're
-        // also invoked at N=head_dim=128).
+        // BLOCK_SIZE ablation knob for decode add_rms_norm only.
         let rms_block = env_usize_or("GROUT_RMS_BLOCK", ADD_RMS_DECODE_BLOCK);
         // Tile-tuning knobs for kernels that fire in decode.
         let embed_block = env_usize_or("GROUT_EMBED_BLOCK", EMBED_BLOCK);
@@ -2431,7 +2371,7 @@ impl Qwen3Engine {
                 .map_err(|e| anyhow::anyhow!("alloc argmax_block_idx failed: {e:?}"))?,
             // Flat layout [kv_heads, NUM_KV_SPLITS * GROUP, D] (att) and
             // [kv_heads, NUM_KV_SPLITS * GROUP] (lse) — split-major. See
-            // comments in fmha_decode_gqa_split / splitk_reduce_merge.
+            // comments in fmha_decode_gqa_split_mapped / splitk_reduce_merge_mapped.
             fmha_att_partial: api::zeros::<f16>(&[
                 kv_heads,
                 fmha_num_kv_splits * fmha_group_size,
@@ -2439,19 +2379,16 @@ impl Qwen3Engine {
             ])
             .sync_on(stream)
             .map_err(|e| anyhow::anyhow!("alloc fmha_att_partial failed: {e:?}"))?,
-            // Same memory layout either way; the safe path shapes it one row
-            // per CTA ([kv_heads * splits, GROUP]) so the split kernel's
-            // per-CTA lse tile view lines up with the mapped 1-D grid, and
-            // hands the merge kernel a [kv_heads, splits * GROUP] read view.
-            fmha_lse_partial: if safe_kernels_enabled() {
-                api::zeros::<f32>(&[kv_heads * fmha_num_kv_splits, fmha_group_size])
-                    .sync_on(stream)
-                    .map_err(|e| anyhow::anyhow!("alloc fmha_lse_partial failed: {e:?}"))?
-            } else {
-                api::zeros::<f32>(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
-                    .sync_on(stream)
-                    .map_err(|e| anyhow::anyhow!("alloc fmha_lse_partial failed: {e:?}"))?
-            },
+            // Shaped one row per CTA ([kv_heads * splits, GROUP]) so the
+            // split kernel's per-CTA lse tile view lines up with the mapped
+            // 1-D grid; the merge kernel gets a [kv_heads, splits * GROUP]
+            // read view.
+            fmha_lse_partial: api::zeros::<f32>(&[
+                kv_heads * fmha_num_kv_splits,
+                fmha_group_size,
+            ])
+            .sync_on(stream)
+            .map_err(|e| anyhow::anyhow!("alloc fmha_lse_partial failed: {e:?}"))?,
         };
 
         // ── Extract KV caches from layer state (Arc → owned Tensor) ───────
@@ -2677,48 +2614,28 @@ impl Qwen3Engine {
                         let v_3d = v_1d
                             .view(&[1, kv_heads, head_dim])
                             .map_err(|e| anyhow::anyhow!("view failed: {e:?}"))?;
-                        if safe_kernels_enabled() {
-                            let ntb = (kv_heads * (head_dim / kv_cache_dyn_chunk_d)) as u32;
-                            kv_cache_update_seq_dynpos_mapped_f16(
-                                (k_cache)
-                                    .partition([1, 1, kv_cache_dyn_chunk_d])
-                                    .map([1, 1, 1], ntb),
-                                (v_cache)
-                                    .partition([1, 1, kv_cache_dyn_chunk_d])
-                                    .map([1, 1, 1], ntb),
-                                &rope_k_ref,
-                                &v_3d,
-                                &position,
-                                1i32,
-                            )
-                            .generics(vec![
-                                head_dim.to_string(),
-                                kv_cache_dyn_chunk_d.to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                            ])
-                            .sync_on(stream)
-                            .map_err(|e| anyhow::anyhow!("prime kv_cache_update failed: {e:?}"))?;
-                        } else {
-                            unsafe {
-                                kv_cache_update_seq_dynpos_f16(
-                                    &rope_k_ref,
-                                    &v_3d,
-                                    (k_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
-                                    (v_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
-                                    &position,
-                                    1i32,
-                                )
-                            }
-                            .generics(vec![
-                                head_dim.to_string(),
-                                kv_cache_dyn_chunk_d.to_string(),
-                                max_seq_len.to_string(),
-                            ])
-                            .sync_on(stream)
-                            .map_err(|e| anyhow::anyhow!("prime kv_cache_update failed: {e:?}"))?;
-                        }
+                        let ntb = (kv_heads * (head_dim / kv_cache_dyn_chunk_d)) as u32;
+                        kv_cache_update_seq_dynpos_mapped_f16(
+                            (k_cache)
+                                .partition([1, 1, kv_cache_dyn_chunk_d])
+                                .map([1, 1, 1], ntb),
+                            (v_cache)
+                                .partition([1, 1, kv_cache_dyn_chunk_d])
+                                .map([1, 1, 1], ntb),
+                            &rope_k_ref,
+                            &v_3d,
+                            &position,
+                            1i32,
+                        )
+                        .generics(vec![
+                            head_dim.to_string(),
+                            kv_cache_dyn_chunk_d.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .sync_on(stream)
+                        .map_err(|e| anyhow::anyhow!("prime kv_cache_update failed: {e:?}"))?;
                     }
 
                     // Attention (Q from fused RoPE output)
@@ -2859,128 +2776,76 @@ impl Qwen3Engine {
                         let qk_scale_f16 = f16::from_f32(qk_scale);
                         // Per-CTA partition shapes: [1, GROUP, 1, D] for att,
                         // [1, GROUP, 1] for lse. Grid = (kv_heads, num_splits).
-                        if safe_kernels_enabled() {
-                            // Mapped ports: att/out stores are proved disjoint
-                            // mapped stores, K/V loads bounds-checked +
-                            // pipelined; lse keeps the legacy store (mixed
-                            // tile shapes cannot share a map yet).
-                            let split_ntb = (kv_heads * fmha_num_kv_splits) as u32;
-                            // fmha_lse_partial is allocated one-row-per-CTA
-                            // ([kv_heads * splits, GROUP]) in safe mode, so
-                            // the legacy per-CTA lse tile view lines up with
-                            // the mapped 1-D grid.
-                            unsafe {
-                                fmha_decode_gqa_split_mapped(
-                                    (&mut bufs.fmha_att_partial)
-                                        .partition([1, fmha_group_size, head_dim])
-                                        .map([1, 1, 1], split_ntb),
-                                    &rope_q_grouped,
-                                    &*k_cache,
-                                    &*v_cache,
-                                    (&mut bufs.fmha_lse_partial)
-                                        .partition([1, fmha_group_size]),
-                                    qk_scale_f16,
-                                    &position,
-                                )
-                            }
-                            .generics(vec![
-                                fmha_group_size.to_string(),
-                                attn_bn.to_string(),
-                                head_dim.to_string(),
-                                fmha_num_kv_splits.to_string(),
-                                fmha_decode_latency.to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                            ])
-                            .compile_options(compile_options_with_occupancy(
-                                fmha_decode_occupancy,
-                            ))
-                            .sync_on(stream)
-                            .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
-                            let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
-                            let lse_view = bufs
-                                .fmha_lse_partial
-                                .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
-                                .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
-                            let merge_inv = splitk_reduce_merge_mapped(
-                                (&mut bufs.attn_out)
-                                    .partition([1, fmha_group_size, fmha_merge_chunk_d])
-                                    .map([1, 1, 1], merge_ntb),
-                                &bufs.fmha_att_partial,
-                                &lse_view,
+                        // Mapped ports: att/out stores are proved disjoint
+                        // mapped stores, K/V loads bounds-checked +
+                        // pipelined; lse keeps the legacy store (mixed
+                        // tile shapes cannot share a map yet).
+                        let split_ntb = (kv_heads * fmha_num_kv_splits) as u32;
+                        // fmha_lse_partial is allocated one-row-per-CTA
+                        // ([kv_heads * splits, GROUP]), so the legacy per-CTA
+                        // lse tile view lines up with the mapped 1-D grid.
+                        unsafe {
+                            fmha_decode_gqa_split_mapped(
+                                (&mut bufs.fmha_att_partial)
+                                    .partition([1, fmha_group_size, head_dim])
+                                    .map([1, 1, 1], split_ntb),
+                                &rope_q_grouped,
+                                &*k_cache,
+                                &*v_cache,
+                                (&mut bufs.fmha_lse_partial)
+                                    .partition([1, fmha_group_size]),
+                                qk_scale_f16,
+                                &position,
                             )
-                            .generics(vec![
-                                fmha_group_size.to_string(),
-                                head_dim.to_string(),
-                                fmha_merge_chunk_d.to_string(),
-                                fmha_num_kv_splits.to_string(),
-                                (fmha_num_kv_splits * fmha_group_size).to_string(),
-                                fmha_merge_latency.to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                            ]);
-                            let merge_inv = match fmha_merge_occupancy {
-                                Some(occ) => merge_inv.compile_options(
-                                    CompileOptions::default().occupancy(occ as i32),
-                                ),
-                                None => merge_inv,
-                            };
-                            merge_inv
-                                .sync_on(stream)
-                                .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
-                        } else {
-                            unsafe {
-                                fmha_decode_gqa_split(
-                                    &rope_q_grouped,
-                                    &*k_cache,
-                                    &*v_cache,
-                                    (&mut bufs.fmha_att_partial).partition([
-                                        1,
-                                        fmha_group_size,
-                                        head_dim,
-                                    ]),
-                                    (&mut bufs.fmha_lse_partial).partition([1, fmha_group_size]),
-                                    qk_scale_f16,
-                                    &position,
-                                )
-                            }
-                            .generics(vec![
-                                fmha_group_size.to_string(),
-                                attn_bn.to_string(),
-                                head_dim.to_string(),
-                                fmha_num_kv_splits.to_string(),
-                                fmha_decode_latency.to_string(),
-                            ])
-                            .compile_options(compile_options_with_occupancy(
-                                fmha_decode_occupancy,
-                            ))
-                            .sync_on(stream)
-                            .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
-                            unsafe {
-                                splitk_reduce_merge(
-                                    &bufs.fmha_att_partial,
-                                    &bufs.fmha_lse_partial,
-                                    (&mut bufs.attn_out).partition([
-                                        1,
-                                        fmha_group_size,
-                                        fmha_merge_chunk_d,
-                                    ]),
-                                )
-                            }
-                            .generics(vec![
-                                fmha_group_size.to_string(),
-                                head_dim.to_string(),
-                                fmha_merge_chunk_d.to_string(),
-                                fmha_num_kv_splits.to_string(),
-                                (fmha_num_kv_splits * fmha_group_size).to_string(),
-                                fmha_merge_latency.to_string(),
-                            ])
+                        }
+                        .generics(vec![
+                            fmha_group_size.to_string(),
+                            attn_bn.to_string(),
+                            head_dim.to_string(),
+                            fmha_num_kv_splits.to_string(),
+                            fmha_decode_latency.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
+                        .compile_options(compile_options_with_occupancy(
+                            fmha_decode_occupancy,
+                        ))
+                        .sync_on(stream)
+                        .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
+                        let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
+                        let lse_view = bufs
+                            .fmha_lse_partial
+                            .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
+                            .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
+                        let merge_inv = splitk_reduce_merge_mapped(
+                            (&mut bufs.attn_out)
+                                .partition([1, fmha_group_size, fmha_merge_chunk_d])
+                                .map([1, 1, 1], merge_ntb),
+                            &bufs.fmha_att_partial,
+                            &lse_view,
+                        )
+                        .generics(vec![
+                            fmha_group_size.to_string(),
+                            head_dim.to_string(),
+                            fmha_merge_chunk_d.to_string(),
+                            fmha_num_kv_splits.to_string(),
+                            (fmha_num_kv_splits * fmha_group_size).to_string(),
+                            fmha_merge_latency.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ]);
+                        let merge_inv = match fmha_merge_occupancy {
+                            Some(occ) => merge_inv.compile_options(
+                                CompileOptions::default().occupancy(occ as i32),
+                            ),
+                            None => merge_inv,
+                        };
+                        merge_inv
                             .sync_on(stream)
                             .map_err(|e| anyhow::anyhow!("prime fmha_merge failed: {e:?}"))?;
-                        }
-                    } else if safe_kernels_enabled() {
+                    } else {
                         // Safe mapped port of the decode attention fallback:
                         // one index per CTA on the (1, attn_heads, 1) grid.
                         let ntb = attn_heads as u32;
@@ -3002,25 +2867,6 @@ impl Qwen3Engine {
                             "1".to_string(),
                             "1".to_string(),
                             "1".to_string(),
-                        ])
-                        .sync_on(stream)
-                        .map_err(|e| anyhow::anyhow!("prime attn failed: {e:?}"))?;
-                    } else {
-                        unsafe {
-                            flash_attn_causal_seq_dynpos_f16(
-                                &attn_q,
-                                &*k_cache,
-                                &*v_cache,
-                                (&mut bufs.attn_out).partition([ATTN_BM_DECODE, 1, head_dim]),
-                                qk_scale,
-                                query_group_size,
-                                &position,
-                            )
-                        }
-                        .generics(vec![
-                            ATTN_BM_DECODE.to_string(),
-                            attn_bn.to_string(),
-                            head_dim.to_string(),
                         ])
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime attn failed: {e:?}"))?;
@@ -3371,48 +3217,28 @@ impl Qwen3Engine {
                         let v_3d = v_1d
                             .view(&[1, kv_heads, head_dim])
                             .map_err(|e| anyhow::anyhow!("view v_3d: {e:?}"))?;
-                        if safe_kernels_enabled() {
-                            let ntb = (kv_heads * (head_dim / kv_cache_dyn_chunk_d)) as u32;
-                            s.record(
-                                kv_cache_update_seq_dynpos_mapped_f16(
-                                    (k_cache)
-                                        .partition([1, 1, kv_cache_dyn_chunk_d])
-                                        .map([1, 1, 1], ntb),
-                                    (v_cache)
-                                        .partition([1, 1, kv_cache_dyn_chunk_d])
-                                        .map([1, 1, 1], ntb),
-                                    &rope_k_3d,
-                                    &v_3d,
-                                    &position,
-                                    1i32,
-                                )
-                                .generics(vec![
-                                    head_dim.to_string(),
-                                    kv_cache_dyn_chunk_d.to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                ]),
-                            )?;
-                        } else {
-                            s.record(
-                                unsafe {
-                                    kv_cache_update_seq_dynpos_f16(
-                                        &rope_k_3d,
-                                        &v_3d,
-                                        (k_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
-                                        (v_cache).partition([1, max_seq_len, kv_cache_dyn_chunk_d]),
-                                        &position,
-                                        1i32,
-                                    )
-                                }
-                                .generics(vec![
-                                    head_dim.to_string(),
-                                    kv_cache_dyn_chunk_d.to_string(),
-                                    max_seq_len.to_string(),
-                                ]),
-                            )?;
-                        }
+                        let ntb = (kv_heads * (head_dim / kv_cache_dyn_chunk_d)) as u32;
+                        s.record(
+                            kv_cache_update_seq_dynpos_mapped_f16(
+                                (k_cache)
+                                    .partition([1, 1, kv_cache_dyn_chunk_d])
+                                    .map([1, 1, 1], ntb),
+                                (v_cache)
+                                    .partition([1, 1, kv_cache_dyn_chunk_d])
+                                    .map([1, 1, 1], ntb),
+                                &rope_k_3d,
+                                &v_3d,
+                                &position,
+                                1i32,
+                            )
+                            .generics(vec![
+                                head_dim.to_string(),
+                                kv_cache_dyn_chunk_d.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ]),
+                        )?;
                     }
 
                     // Attention (Q from fused RoPE output)
@@ -3523,120 +3349,68 @@ impl Qwen3Engine {
                             .view(&[kv_heads, fmha_group_size, head_dim])
                             .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
                         let qk_scale_f16 = f16::from_f32(qk_scale);
-                        if safe_kernels_enabled() {
-                            let split_ntb = (kv_heads * fmha_num_kv_splits) as u32;
-                            // fmha_lse_partial is allocated one-row-per-CTA
-                            // in safe mode (see DecodeBuffers construction).
-                            s.record(
-                                unsafe {
-                                    fmha_decode_gqa_split_mapped(
-                                        (&mut bufs.fmha_att_partial)
-                                            .partition([1, fmha_group_size, head_dim])
-                                            .map([1, 1, 1], split_ntb),
-                                        &rope_q_grouped,
-                                        &*k_cache,
-                                        &*v_cache,
-                                        (&mut bufs.fmha_lse_partial)
-                                            .partition([1, fmha_group_size]),
-                                        qk_scale_f16,
-                                        &position,
-                                    )
-                                }
-                                .generics(vec![
-                                    fmha_group_size.to_string(),
-                                    attn_bn.to_string(),
-                                    head_dim.to_string(),
-                                    fmha_num_kv_splits.to_string(),
-                                    fmha_decode_latency.to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                ])
-                                .compile_options(compile_options_with_occupancy(
-                                    fmha_decode_occupancy,
-                                )),
-                            )?;
-                            let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
-                            let lse_view = bufs
-                                .fmha_lse_partial
-                                .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
-                                .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
-                            let merge_inv = splitk_reduce_merge_mapped(
-                                (&mut bufs.attn_out)
-                                    .partition([1, fmha_group_size, fmha_merge_chunk_d])
-                                    .map([1, 1, 1], merge_ntb),
-                                &bufs.fmha_att_partial,
-                                &lse_view,
-                            )
+                        let split_ntb = (kv_heads * fmha_num_kv_splits) as u32;
+                        // fmha_lse_partial is allocated one-row-per-CTA
+                        // (see DecodeBuffers construction).
+                        s.record(
+                            unsafe {
+                                fmha_decode_gqa_split_mapped(
+                                    (&mut bufs.fmha_att_partial)
+                                        .partition([1, fmha_group_size, head_dim])
+                                        .map([1, 1, 1], split_ntb),
+                                    &rope_q_grouped,
+                                    &*k_cache,
+                                    &*v_cache,
+                                    (&mut bufs.fmha_lse_partial)
+                                        .partition([1, fmha_group_size]),
+                                    qk_scale_f16,
+                                    &position,
+                                )
+                            }
                             .generics(vec![
                                 fmha_group_size.to_string(),
+                                attn_bn.to_string(),
                                 head_dim.to_string(),
-                                fmha_merge_chunk_d.to_string(),
                                 fmha_num_kv_splits.to_string(),
-                                (fmha_num_kv_splits * fmha_group_size).to_string(),
-                                fmha_merge_latency.to_string(),
+                                fmha_decode_latency.to_string(),
                                 "1".to_string(),
                                 "1".to_string(),
                                 "1".to_string(),
-                            ]);
-                            let merge_inv = match fmha_merge_occupancy {
-                                Some(occ) => merge_inv.compile_options(
-                                    CompileOptions::default().occupancy(occ as i32),
-                                ),
-                                None => merge_inv,
-                            };
-                            s.record(merge_inv)?;
-                        } else {
-                            s.record(
-                                unsafe {
-                                    fmha_decode_gqa_split(
-                                        &rope_q_grouped,
-                                        &*k_cache,
-                                        &*v_cache,
-                                        (&mut bufs.fmha_att_partial).partition([
-                                            1,
-                                            fmha_group_size,
-                                            head_dim,
-                                        ]),
-                                        (&mut bufs.fmha_lse_partial)
-                                            .partition([1, fmha_group_size]),
-                                        qk_scale_f16,
-                                        &position,
-                                    )
-                                }
-                                .generics(vec![
-                                    fmha_group_size.to_string(),
-                                    attn_bn.to_string(),
-                                    head_dim.to_string(),
-                                    fmha_num_kv_splits.to_string(),
-                                    fmha_decode_latency.to_string(),
-                                ])
-                                .compile_options(compile_options_with_occupancy(
-                                    fmha_decode_occupancy,
-                                )),
-                            )?;
-                            s.record(
-                                unsafe {
-                                    splitk_reduce_merge(
-                                        &bufs.fmha_att_partial,
-                                        &bufs.fmha_lse_partial,
-                                        (&mut bufs.attn_out).partition([
-                                            1,
-                                            fmha_group_size,
-                                            fmha_merge_chunk_d,
-                                        ]),
-                                    )
-                                }
-                                .generics(vec![
-                                    fmha_group_size.to_string(),
-                                    head_dim.to_string(),
-                                    fmha_merge_chunk_d.to_string(),
-                                    fmha_num_kv_splits.to_string(),
-                                    (fmha_num_kv_splits * fmha_group_size).to_string(),
-                                    fmha_merge_latency.to_string(),
-                                ]),
-                            )?;
-                        }
+                            ])
+                            .compile_options(compile_options_with_occupancy(
+                                fmha_decode_occupancy,
+                            )),
+                        )?;
+                        let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
+                        let lse_view = bufs
+                            .fmha_lse_partial
+                            .view(&[kv_heads, fmha_num_kv_splits * fmha_group_size])
+                            .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
+                        let merge_inv = splitk_reduce_merge_mapped(
+                            (&mut bufs.attn_out)
+                                .partition([1, fmha_group_size, fmha_merge_chunk_d])
+                                .map([1, 1, 1], merge_ntb),
+                            &bufs.fmha_att_partial,
+                            &lse_view,
+                        )
+                        .generics(vec![
+                            fmha_group_size.to_string(),
+                            head_dim.to_string(),
+                            fmha_merge_chunk_d.to_string(),
+                            fmha_num_kv_splits.to_string(),
+                            (fmha_num_kv_splits * fmha_group_size).to_string(),
+                            fmha_merge_latency.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ]);
+                        let merge_inv = match fmha_merge_occupancy {
+                            Some(occ) => merge_inv.compile_options(
+                                CompileOptions::default().occupancy(occ as i32),
+                            ),
+                            None => merge_inv,
+                        };
+                        s.record(merge_inv)?;
                     } else {
                         let qk_rope_1d_attn = bufs
                             .qk_rope
@@ -3648,53 +3422,28 @@ impl Qwen3Engine {
                         let rope_q_view = rope_q_1d
                             .view(&[1, attn_heads, head_dim])
                             .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
-                        if safe_kernels_enabled() {
-                            let ntb = attn_heads as u32;
-                            s.record(
-                                flash_attn_causal_seq_dynpos_mapped_f16(
-                                    (&mut bufs.attn_out)
-                                        .partition([ATTN_BM_DECODE, 1, head_dim])
-                                        .map([1, 1, 1], ntb),
-                                    &rope_q_view,
-                                    &*k_cache,
-                                    &*v_cache,
-                                    qk_scale,
-                                    query_group_size,
-                                    &position,
-                                )
-                                .generics(vec![
-                                    ATTN_BM_DECODE.to_string(),
-                                    attn_bn.to_string(),
-                                    head_dim.to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                    "1".to_string(),
-                                ]),
-                            )?;
-                        } else {
-                            s.record(
-                                unsafe {
-                                    flash_attn_causal_seq_dynpos_f16(
-                                        &rope_q_view,
-                                        &*k_cache,
-                                        &*v_cache,
-                                        (&mut bufs.attn_out).partition([
-                                            ATTN_BM_DECODE,
-                                            1,
-                                            head_dim,
-                                        ]),
-                                        qk_scale,
-                                        query_group_size,
-                                        &position,
-                                    )
-                                }
-                                .generics(vec![
-                                    ATTN_BM_DECODE.to_string(),
-                                    attn_bn.to_string(),
-                                    head_dim.to_string(),
-                                ]),
-                            )?;
-                        }
+                        let ntb = attn_heads as u32;
+                        s.record(
+                            flash_attn_causal_seq_dynpos_mapped_f16(
+                                (&mut bufs.attn_out)
+                                    .partition([ATTN_BM_DECODE, 1, head_dim])
+                                    .map([1, 1, 1], ntb),
+                                &rope_q_view,
+                                &*k_cache,
+                                &*v_cache,
+                                qk_scale,
+                                query_group_size,
+                                &position,
+                            )
+                            .generics(vec![
+                                ATTN_BM_DECODE.to_string(),
+                                attn_bn.to_string(),
+                                head_dim.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ]),
+                        )?;
                     }
 
                     // O projection: attn_out → attn_proj
@@ -5250,73 +4999,38 @@ impl Qwen3Engine {
             "add_rms_norm residual_out numel mismatch, got {:?}",
             residual_out.shape()
         );
-        if safe_kernels_enabled() {
-            // Safe dual-output kernel: both outputs share one index stream
-            // (iter_indices_with), one row per index on a single masked tile.
-            let bs = n.next_power_of_two();
-            let out = out
-                .reshape(&[rows, n])
-                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
-                .partition([1, bs])
-                .map([1, 1], rows as u32);
-            let residual_out = residual_out
-                .reshape(&[rows, n])
-                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
-                .partition([1, bs])
-                .map([1, 1], rows as u32);
-            let result = unsafe {
-                add_rms_norm_mapped_f16(
-                    value(out),
-                    value(residual_out),
-                    value(residual),
-                    value(x),
-                    value(weight),
-                    value(self.cfg.rms_norm_eps),
-                )
-                .generics(vec![
-                    n.to_string(),
-                    bs.to_string(),
-                    "1".to_string(),
-                    "1".to_string(),
-                ])
-                .execute(ctx)?
-            };
-            let out = result.0;
-            let residual_out = result.1;
-            return Ok((
-                out.unpartition()
-                    .reshape(&orig_shape)
-                    .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?,
-                residual_out
-                    .unpartition()
-                    .reshape(&orig_shape)
-                    .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?,
-            ));
-        }
+        // Safe dual-output kernel: both outputs share one index stream
+        // (iter_indices_with), one row per index on a single masked tile.
+        let bs = n.next_power_of_two();
         let out = out
             .reshape(&[rows, n])
             .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
-            .partition([1, n]);
+            .partition([1, bs])
+            .map([1, 1], rows as u32);
         let residual_out = residual_out
             .reshape(&[rows, n])
             .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
-            .partition([1, n]);
+            .partition([1, bs])
+            .map([1, 1], rows as u32);
         let result = unsafe {
-            add_rms_norm_f16(
+            add_rms_norm_mapped_f16(
+                value(out),
+                value(residual_out),
                 value(residual),
                 value(x),
                 value(weight),
-                value(out),
-                value(residual_out),
                 value(self.cfg.rms_norm_eps),
             )
-            .generics(vec![n.to_string(), self.add_rms_block.to_string()])
+            .generics(vec![
+                n.to_string(),
+                bs.to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ])
             .execute(ctx)?
         };
-        let _residual: Arc<Tensor<f16>> = result.0;
-        let _x: Arc<Tensor<f16>> = result.1;
-        let out: Partition<Tensor<f16>> = result.3;
-        let residual_out: Partition<Tensor<f16>> = result.4;
+        let out = result.0;
+        let residual_out = result.1;
         Ok((
             out.unpartition()
                 .reshape(&orig_shape)
@@ -5390,70 +5104,34 @@ impl Qwen3Engine {
             "rms_norm output numel mismatch, got {:?}",
             out.shape()
         );
-        if safe_kernels_enabled() {
-            // Safe mapped-partition kernel: one index per row on a single
-            // [1, BS] tile with BS = next_pow2(n) (overhang masked by tile IR;
-            // OOB sum-of-squares contributes zero). Disjoint stores are proved
-            // by the partition map — no unsafe.
-            let bs = n.next_power_of_two();
-            let out = out
-                .reshape(&[rows, n])
-                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
-                .partition([1, bs])
-                .map([1, 1], rows as u32);
-            // The kernel itself is safe; the remaining unsafe is DeviceOp::execute
-            // (the async-executor trait method), which is unsafe for all ops.
-            let result = unsafe {
-                rms_norm_mapped_f16(
-                    value(out),
-                    value(x),
-                    value(weight),
-                    value(self.cfg.rms_norm_eps),
-                )
-                .generics(vec![
-                    n.to_string(),
-                    bs.to_string(),
-                    "1".to_string(),
-                    "1".to_string(),
-                ])
-                .execute(ctx)?
-            };
-            let out = result.0;
-            return Ok(out
-                .unpartition()
-                .reshape(&orig_shape)
-                .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?);
-        }
+        // Safe mapped-partition kernel: one index per row on a single
+        // [1, BS] tile with BS = next_pow2(n) (overhang masked by tile IR;
+        // OOB sum-of-squares contributes zero). Disjoint stores are proved
+        // by the partition map — no unsafe.
+        let bs = n.next_power_of_two();
         let out = out
             .reshape(&[rows, n])
             .map_err(|e| anyhow::anyhow!("reshape failed: {e:?}"))?
-            .partition([1, n]);
-        // Pick BLOCK_SIZE per n: small n (head_dim=128) gets RMS_BLOCK=128
-        // because BS > N panics cutile. Hidden-size RMS can be retuned with
-        // GROUT_RMS_HIDDEN_BLOCK; it must be a power of two and divide N
-        // because cutile requires pow-2 tile lengths and this kernel uses
-        // exact N / BLOCK_SIZE tiling.
-        let bs = if n >= RMS_BLOCK_HIDDEN {
-            if self.rms_hidden_block <= n && n % self.rms_hidden_block == 0 {
-                self.rms_hidden_block
-            } else {
-                RMS_BLOCK_HIDDEN
-            }
-        } else {
-            RMS_BLOCK
-        };
+            .partition([1, bs])
+            .map([1, 1], rows as u32);
+        // The kernel itself is safe; the remaining unsafe is DeviceOp::execute
+        // (the async-executor trait method), which is unsafe for all ops.
         let result = unsafe {
-            rms_norm_f16(
+            rms_norm_mapped_f16(
+                value(out),
                 value(x),
                 value(weight),
-                value(out),
                 value(self.cfg.rms_norm_eps),
             )
-            .generics(vec![n.to_string(), bs.to_string()])
+            .generics(vec![
+                n.to_string(),
+                bs.to_string(),
+                "1".to_string(),
+                "1".to_string(),
+            ])
             .execute(ctx)?
         };
-        let _x: Arc<Tensor<f16>> = result.0;
-        let out: Partition<Tensor<f16>> = result.2;
+        let out = result.0;
         Ok(out
             .unpartition()
             .reshape(&orig_shape)
@@ -5687,141 +5365,79 @@ impl Qwen3Engine {
             .take()
             .context("missing v_cache in layer state")?;
         let bm_s = env_usize_or("GROUT_KV_CACHE_BM_S", KV_CACHE_BM_S_DEFAULT);
-        if safe_kernels_enabled() {
-            // Safe mapped-partition kernels: per-token [1, 1, chunk] cache
-            // tiles, logical grid (kv_heads, max_seq, head_dim/chunk); the
-            // kernel sub-ranges the seq axis to exactly the written tokens
-            // (iter_indices_within_with brands one index stream for both
-            // cache stores). num_tile_blocks mirrors the legacy CTA counts.
-            let kv_heads = self.cfg.num_key_value_heads;
-            let head_dim = self.cfg.head_dim;
-            match position_input {
-                PositionInput::Host(position_start) => {
-                    debug_assert_eq!(
-                        *position_start, 0,
-                        "kv_cache_update_seq_mapped_f16 assumes position_start==0 \
-                         (prefill path); got {position_start}"
-                    );
-                    let num_tile_blocks = kv_heads * seq_len.div_ceil(bm_s);
-                    let k_part = k_cache
-                        .partition([1, 1, VEC_BLOCK])
-                        .map([1, 1, 1], num_tile_blocks as u32);
-                    let v_part = v_cache
-                        .partition([1, 1, VEC_BLOCK])
-                        .map([1, 1, 1], num_tile_blocks as u32);
-                    let result = unsafe {
-                        kv_cache_update_seq_mapped_f16(
-                            value(k_part),
-                            value(v_part),
-                            value(new_k),
-                            value(new_v),
-                            value(seq_len as i32),
-                        )
-                        .generics(vec![
-                            head_dim.to_string(),
-                            VEC_BLOCK.to_string(),
-                            "1".to_string(),
-                            "1".to_string(),
-                            "1".to_string(),
-                        ])
-                        .execute(ctx)?
-                    };
-                    layer.state.k_cache = Some(Arc::new(result.0.unpartition()));
-                    layer.state.v_cache = Some(Arc::new(result.1.unpartition()));
-                }
-                PositionInput::Device(position_start) => {
-                    let chunk_d =
-                        env_usize_or("GROUT_KV_CACHE_DYN_CHUNK_D", KV_CACHE_DYN_CHUNK_D_DEFAULT);
-                    let num_tile_blocks = kv_heads * (head_dim / chunk_d);
-                    let k_part = k_cache
-                        .partition([1, 1, chunk_d])
-                        .map([1, 1, 1], num_tile_blocks as u32);
-                    let v_part = v_cache
-                        .partition([1, 1, chunk_d])
-                        .map([1, 1, 1], num_tile_blocks as u32);
-                    let result = unsafe {
-                        kv_cache_update_seq_dynpos_mapped_f16(
-                            value(k_part),
-                            value(v_part),
-                            value(new_k),
-                            value(new_v),
-                            value(position_start.clone()),
-                            value(seq_len as i32),
-                        )
-                        .generics(vec![
-                            head_dim.to_string(),
-                            chunk_d.to_string(),
-                            "1".to_string(),
-                            "1".to_string(),
-                            "1".to_string(),
-                        ])
-                        .execute(ctx)?
-                    };
-                    layer.state.k_cache = Some(Arc::new(result.0.unpartition()));
-                    layer.state.v_cache = Some(Arc::new(result.1.unpartition()));
-                }
+        // Safe mapped-partition kernels: per-token [1, 1, chunk] cache
+        // tiles, logical grid (kv_heads, max_seq, head_dim/chunk); the
+        // kernel sub-ranges the seq axis to exactly the written tokens
+        // (iter_indices_within_with brands one index stream for both
+        // cache stores). num_tile_blocks mirrors the legacy CTA counts.
+        let kv_heads = self.cfg.num_key_value_heads;
+        let head_dim = self.cfg.head_dim;
+        match position_input {
+            PositionInput::Host(position_start) => {
+                debug_assert_eq!(
+                    *position_start, 0,
+                    "kv_cache_update_seq_mapped_f16 assumes position_start==0 \
+                     (prefill path); got {position_start}"
+                );
+                let num_tile_blocks = kv_heads * seq_len.div_ceil(bm_s);
+                let k_part = k_cache
+                    .partition([1, 1, VEC_BLOCK])
+                    .map([1, 1, 1], num_tile_blocks as u32);
+                let v_part = v_cache
+                    .partition([1, 1, VEC_BLOCK])
+                    .map([1, 1, 1], num_tile_blocks as u32);
+                let result = unsafe {
+                    kv_cache_update_seq_mapped_f16(
+                        value(k_part),
+                        value(v_part),
+                        value(new_k),
+                        value(new_v),
+                        value(seq_len as i32),
+                    )
+                    .generics(vec![
+                        head_dim.to_string(),
+                        VEC_BLOCK.to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
+                    ])
+                    .execute(ctx)?
+                };
+                layer.state.k_cache = Some(Arc::new(result.0.unpartition()));
+                layer.state.v_cache = Some(Arc::new(result.1.unpartition()));
             }
-            return Ok(());
+            PositionInput::Device(position_start) => {
+                let chunk_d =
+                    env_usize_or("GROUT_KV_CACHE_DYN_CHUNK_D", KV_CACHE_DYN_CHUNK_D_DEFAULT);
+                let num_tile_blocks = kv_heads * (head_dim / chunk_d);
+                let k_part = k_cache
+                    .partition([1, 1, chunk_d])
+                    .map([1, 1, 1], num_tile_blocks as u32);
+                let v_part = v_cache
+                    .partition([1, 1, chunk_d])
+                    .map([1, 1, 1], num_tile_blocks as u32);
+                let result = unsafe {
+                    kv_cache_update_seq_dynpos_mapped_f16(
+                        value(k_part),
+                        value(v_part),
+                        value(new_k),
+                        value(new_v),
+                        value(position_start.clone()),
+                        value(seq_len as i32),
+                    )
+                    .generics(vec![
+                        head_dim.to_string(),
+                        chunk_d.to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
+                    ])
+                    .execute(ctx)?
+                };
+                layer.state.k_cache = Some(Arc::new(result.0.unpartition()));
+                layer.state.v_cache = Some(Arc::new(result.1.unpartition()));
+            }
         }
-        let (k_cache, v_cache): (Partition<Tensor<f16>>, Partition<Tensor<f16>>) =
-            match position_input {
-                PositionInput::Host(position_start) => {
-                    debug_assert_eq!(
-                        *position_start, 0,
-                        "kv_cache_update_seq_f16 assumes position_start==0 \
-                         (prefill path); got {position_start}"
-                    );
-                    // Host (prefill) path uses the new BM_S-sharded
-                    // kernel: partition tile is [1, BM_S, VEC_BLOCK] so
-                    // the grid becomes (num_kv_heads, max_seq_len/BM_S, 1).
-                    let k_cache_part = k_cache.partition([1, bm_s, VEC_BLOCK]);
-                    let v_cache_part = v_cache.partition([1, bm_s, VEC_BLOCK]);
-                    let result = unsafe {
-                        kv_cache_update_seq_f16(
-                            value(new_k),
-                            value(new_v),
-                            value(k_cache_part),
-                            value(v_cache_part),
-                            value(*position_start as i32),
-                            value(seq_len as i32),
-                        )
-                        .generics(vec![
-                            self.cfg.head_dim.to_string(),
-                            VEC_BLOCK.to_string(),
-                            bm_s.to_string(),
-                        ])
-                        .execute(ctx)?
-                    };
-                    (result.2, result.3)
-                }
-                PositionInput::Device(position_start) => {
-                    // Device (decode) path. CHUNK_D sharding expands grid
-                    // from (kv_heads, 1, 1) to (kv_heads, 1, head_dim/CHUNK_D).
-                    let chunk_d =
-                        env_usize_or("GROUT_KV_CACHE_DYN_CHUNK_D", KV_CACHE_DYN_CHUNK_D_DEFAULT);
-                    let k_cache_part = k_cache.partition([1, self.max_seq_len, chunk_d]);
-                    let v_cache_part = v_cache.partition([1, self.max_seq_len, chunk_d]);
-                    let result = unsafe {
-                        kv_cache_update_seq_dynpos_f16(
-                            value(new_k),
-                            value(new_v),
-                            value(k_cache_part),
-                            value(v_cache_part),
-                            value(position_start.clone()),
-                            value(seq_len as i32),
-                        )
-                        .generics(vec![
-                            self.cfg.head_dim.to_string(),
-                            chunk_d.to_string(),
-                            self.max_seq_len.to_string(),
-                        ])
-                        .execute(ctx)?
-                    };
-                    (result.2, result.3)
-                }
-            };
-        layer.state.k_cache = Some(Arc::new(k_cache.unpartition()));
-        layer.state.v_cache = Some(Arc::new(v_cache.unpartition()));
         Ok(())
     }
 
@@ -6067,57 +5683,25 @@ impl Qwen3Engine {
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
-                    if safe_kernels_enabled() {
-                        // Safe mapped port: one index per CTA on the
-                        // (q_tiles, heads/GROUP, 1) logical grid.
-                        let ntb = (q_len.div_ceil(attn_bm)
-                            * (self.cfg.num_attention_heads / group))
-                            as u32;
-                        let out_part = out
-                            .partition([attn_bm, group, self.cfg.head_dim])
-                            .map([1, 1, 1], ntb);
-                        let result = unsafe {
-                            fmha_prefill_gqa_mapped(
-                                value(out_part),
-                                value(q.clone()),
-                                value(k_cache.clone()),
-                                value(v_cache.clone()),
-                                value(qk_scale),
-                                value(query_group_size),
-                                value(kv_len),
-                                value(*position_start as i32),
-                            )
-                            .generics(vec![
-                                attn_bm.to_string(),
-                                attn_bn.to_string(),
-                                self.cfg.head_dim.to_string(),
-                                group.to_string(),
-                                m_eff.to_string(),
-                                1.to_string(), // CAUSAL
-                                even_k.to_string(),
-                                prefill_latency.to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                            ])
-                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
-                            .execute(ctx)?
-                        };
-                        result.0.unpartition()
-                    } else {
-                        let out_part = out.partition([attn_bm, group, self.cfg.head_dim]);
-                        let result = unsafe {
-                            fmha_prefill_gqa(
-                                value(q.clone()),
-                                value(k_cache.clone()),
-                                value(v_cache.clone()),
-                                value(out_part),
-                                value(qk_scale),
-                                value(query_group_size),
-                                value(kv_len),
-                                value(*position_start as i32),
-                            )
-                        }
+                    // Safe mapped port: one index per CTA on the
+                    // (q_tiles, heads/GROUP, 1) logical grid.
+                    let ntb = (q_len.div_ceil(attn_bm)
+                        * (self.cfg.num_attention_heads / group))
+                        as u32;
+                    let out_part = out
+                        .partition([attn_bm, group, self.cfg.head_dim])
+                        .map([1, 1, 1], ntb);
+                    let result = unsafe {
+                        fmha_prefill_gqa_mapped(
+                            value(out_part),
+                            value(q.clone()),
+                            value(k_cache.clone()),
+                            value(v_cache.clone()),
+                            value(qk_scale),
+                            value(query_group_size),
+                            value(kv_len),
+                            value(*position_start as i32),
+                        )
                         .generics(vec![
                             attn_bm.to_string(),
                             attn_bn.to_string(),
@@ -6127,11 +5711,14 @@ impl Qwen3Engine {
                             1.to_string(), // CAUSAL
                             even_k.to_string(),
                             prefill_latency.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
                         ])
-                        .compile_options(compile_options_with_occupancy(prefill_occupancy));
-                        let result = unsafe { result.execute(ctx)? };
-                        result.3.unpartition()
-                    }
+                        .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                        .execute(ctx)?
+                    };
+                    result.0.unpartition()
                 } else if use_prefill_kernel {
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
                     let prefill_latency =
@@ -6140,54 +5727,24 @@ impl Qwen3Engine {
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
-                    if safe_kernels_enabled() {
-                        // Safe mapped port: one index per CTA on the
-                        // (q_tiles, heads, 1) logical grid.
-                        let ntb =
-                            (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
-                        let out_part = out
-                            .partition([attn_bm, 1, self.cfg.head_dim])
-                            .map([1, 1, 1], ntb);
-                        let result = unsafe {
-                            fmha_prefill_causal_mapped(
-                                value(out_part),
-                                value(q.clone()),
-                                value(k_cache.clone()),
-                                value(v_cache.clone()),
-                                value(qk_scale),
-                                value(query_group_size),
-                                value(kv_len),
-                                value(*position_start as i32),
-                            )
-                            .generics(vec![
-                                attn_bm.to_string(),
-                                attn_bn.to_string(),
-                                self.cfg.head_dim.to_string(),
-                                1.to_string(), // CAUSAL
-                                even_k.to_string(),
-                                prefill_latency.to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                                "1".to_string(),
-                            ])
-                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
-                            .execute(ctx)?
-                        };
-                        result.0.unpartition()
-                    } else {
-                        let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
-                        let result = unsafe {
-                            fmha_prefill_causal(
-                                value(q.clone()),
-                                value(k_cache.clone()),
-                                value(v_cache.clone()),
-                                value(out_part),
-                                value(qk_scale),
-                                value(query_group_size),
-                                value(kv_len),
-                                value(*position_start as i32),
-                            )
-                        }
+                    // Safe mapped port: one index per CTA on the
+                    // (q_tiles, heads, 1) logical grid.
+                    let ntb =
+                        (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
+                    let out_part = out
+                        .partition([attn_bm, 1, self.cfg.head_dim])
+                        .map([1, 1, 1], ntb);
+                    let result = unsafe {
+                        fmha_prefill_causal_mapped(
+                            value(out_part),
+                            value(q.clone()),
+                            value(k_cache.clone()),
+                            value(v_cache.clone()),
+                            value(qk_scale),
+                            value(query_group_size),
+                            value(kv_len),
+                            value(*position_start as i32),
+                        )
                         .generics(vec![
                             attn_bm.to_string(),
                             attn_bn.to_string(),
@@ -6195,12 +5752,15 @@ impl Qwen3Engine {
                             1.to_string(), // CAUSAL
                             even_k.to_string(),
                             prefill_latency.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
                         ])
-                        .compile_options(compile_options_with_occupancy(prefill_occupancy));
-                        let result = unsafe { result.execute(ctx)? };
-                        result.3.unpartition()
-                    }
-                } else if safe_kernels_enabled() {
+                        .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                        .execute(ctx)?
+                    };
+                    result.0.unpartition()
+                } else {
                     // Safe mapped port of the fallback attention kernel.
                     let ntb = (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
                     let out_part = out
@@ -6228,86 +5788,21 @@ impl Qwen3Engine {
                         .execute(ctx)?
                     };
                     result.0.unpartition()
-                } else {
-                    let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
-                    let result = unsafe {
-                        flash_attn_causal_seq_f16(
-                            value(q.clone()),
-                            value(k_cache.clone()),
-                            value(v_cache.clone()),
-                            value(out_part),
-                            value(qk_scale),
-                            value(query_group_size),
-                            value(kv_len),
-                            value(*position_start as i32),
-                        )
-                    }
-                    .generics(vec![
-                        attn_bm.to_string(),
-                        attn_bn.to_string(),
-                        self.cfg.head_dim.to_string(),
-                    ]);
-                    let result = unsafe { result.execute(ctx)? };
-                    result.3.unpartition()
                 }
             }
             PositionInput::Device(position_start) => {
-                if safe_kernels_enabled() {
-                    // Safe mapped port of the device-position fallback.
-                    let m = q.shape()[0] as usize;
-                    let ntb = (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
-                    let out_part = out
-                        .partition([attn_bm, 1, self.cfg.head_dim])
-                        .map([1, 1, 1], ntb);
-                    let result = unsafe {
-                        fmha_causal_mapped(
-                            value(out_part),
-                            value(q.clone()),
-                            value(k_cache.clone()),
-                            value(v_cache.clone()),
-                            value(f16::from_f32(qk_scale)),
-                            value(query_group_size),
-                            value(position_start.clone()),
-                        )
-                        .generics(vec![
-                            attn_bm.to_string(),
-                            attn_bn.to_string(),
-                            self.cfg.head_dim.to_string(),
-                            1.to_string(),
-                            ((m % attn_bn == 0) as i32).to_string(),
-                            "1".to_string(),
-                            "1".to_string(),
-                            "1".to_string(),
-                        ])
-                        .execute(ctx)?
-                    };
-                    return Ok(result.0.unpartition());
-                }
-                let out_part = out.partition([attn_bm, 1, self.cfg.head_dim]);
+                // Safe mapped port of the device-position fallback.
+                let m = q.shape()[0] as usize;
+                let ntb = (q_len.div_ceil(attn_bm) * self.cfg.num_attention_heads) as u32;
+                let out_part = out
+                    .partition([attn_bm, 1, self.cfg.head_dim])
+                    .map([1, 1, 1], ntb);
                 let result = unsafe {
-                    // flash_attn_causal_seq_dynpos_f16_async(
-                    //     value(q.clone()),
-                    //     value(k_cache.clone()),
-                    //     value(v_cache.clone()),
-                    //     value(out),
-                    //     value(f16::from_f32(qk_scale)),
-                    //     value(query_group_size),
-                    //     value(position_start.clone()),
-                    // )
-                    // .generics(vec![
-                    //     ATTN_BM_DECODE.to_string(),
-                    //     attn_bn.to_string(),
-                    //     self.cfg.head_dim.to_string(),
-                    // ])
-
-                    // Try this instead...
-                    let m = q.shape()[0] as usize;
-                    let d = self.cfg.head_dim;
-                    fmha_causal(
+                    fmha_causal_mapped(
+                        value(out_part),
                         value(q.clone()),
                         value(k_cache.clone()),
                         value(v_cache.clone()),
-                        value(out_part),
                         value(f16::from_f32(qk_scale)),
                         value(query_group_size),
                         value(position_start.clone()),
@@ -6315,13 +5810,16 @@ impl Qwen3Engine {
                     .generics(vec![
                         attn_bm.to_string(),
                         attn_bn.to_string(),
-                        d.to_string(),
+                        self.cfg.head_dim.to_string(),
                         1.to_string(),
                         ((m % attn_bn == 0) as i32).to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
+                        "1".to_string(),
                     ])
+                    .execute(ctx)?
                 };
-                let result = unsafe { result.execute(ctx)? };
-                result.3.unpartition()
+                result.0.unpartition()
             }
         };
         Ok(out_tensor)
