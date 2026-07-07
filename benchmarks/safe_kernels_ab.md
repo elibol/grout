@@ -52,14 +52,10 @@ The dispatch retune landed BM=64/BN=32 for pp >= 512; after the
 compiler-side bounds-check hoisting fix, both forms share the same
 optima.
 
-**Decode — parity demonstrated at full check discharge.** -0.20% paired
-at tg=2048 (BN=32 / NUM_KV_SPLITS=16), i.e. within noise. That
-measurement was taken with the merge kernel's three residual checks
-discharged at JIT time; the current tree deliberately keeps those
-checks at runtime (see the check-placement policy below), so a ~1-2%
-decode residual is expected to return until the tracked tileiras
-register fix lands. Accepted trade: the residual is a codegen question,
-not a safety-machinery cost.
+**Decode — parity at full check discharge.** -0.20% paired at tg=2048
+(BN=32 / NUM_KV_SPLITS=16), i.e. within noise, measured with the merge
+kernel's three residual checks discharged at JIT time — which the tree
+preserves via the minimal declared equalities below.
 
 ## Paper-relevant findings
 
@@ -85,33 +81,38 @@ not a safety-machinery cost.
 ## Check-placement policy
 
 The kernels give the compiler enough information to place checks at
-JIT time rather than runtime, in strict preference order:
+JIT time rather than runtime:
 
-1. **Rewrite the kernel** (correctness-preserving) so checks are
-   JIT-time. Example: the norm kernels' column coordinates are
-   structurally constant (single tile, BLOCK_SIZE >= N), so they load
-   with the literal `0` — the checker discharges those axes against
-   the static N dim with no further facts.
-2. **Prefer by-construction evidence** — `Dim` / `with_bounds` /
-   `coord` branding, and same-view origins (an index minted from the
-   tensor it accesses discharges for free). Extending `with_bounds`
-   past rank 2 would bring the attention KV loops under this rung.
-3. **Runtime checks are a last resort**, aggressively optimized and
+1. **Prefer JIT-time checks.** By construction where the structure
+   allows it — correctness-preserving rewrites (the norms' structurally
+   constant column coordinates load with the literal `0`, discharged
+   against the static N dim), `Dim`/`with_bounds`/`coord` branding, and
+   same-view origins (an index minted from the tensor it accesses
+   discharges for free; extending `with_bounds` past rank 2 would bring
+   the attention KV loops here). Where no by-construction proof exists —
+   cross-tensor coordinates relating independently allocated extents —
+   a minimal declared dim-equality (launch-validated by the generated
+   host launcher) provides the JIT-time discharge instead.
+2. **Runtime checks are a last resort**, aggressively optimized and
    hoisted out of hot loops (loop-invariant and affine-induction
    indices are checked once in the loop preheader).
+
+Current declared-equality footprint, kept minimal by rule 1's
+preference order: rms_norm 1 fact, add_rms_norm 2, splitk merge 3 —
+each covering exactly the cross-tensor coordinates with no structural
+proof.
 
 ## Verification boundary
 
 Every bounds check in the safe kernel family is one of:
 
-- **discharged at JIT time** — static shapes, literal coordinates, or
-  same-view branded indices;
+- **discharged at JIT time** — static shapes, literal coordinates,
+  same-view branded indices, or a minimal declared (launch-validated)
+  equality for cross-tensor coordinates;
 - **hoisted** — a runtime check moved out of the hot loop; or
-- **a per-CTA or named value-lattice runtime check** — cross-tensor
-  row coordinates (one comparison per CTA in the norms and merge), and
-  arithmetic-derived coordinates the current lattice cannot relate:
-  `row - num_q_rows` in qk_norm, `s - pos` in kv_cache,
-  `head / GROUP` in attention.
+- **a named value-lattice runtime check** — arithmetic-derived
+  coordinates the current lattice cannot relate: `row - num_q_rows`
+  in qk_norm, `s - pos` in kv_cache, `head / GROUP` in attention.
 
 That is the precise claim; the family is **not** "fully statically
 verified".
@@ -152,9 +153,7 @@ land in cutile.
 ## Tracked follow-ups
 
 - tileiras For-region register pressure (SASS/cubin artifacts saved on
-  the cutile side) — now also the gating item for reclaiming the last
-  ~1-2% decode residual, since the merge kernel's runtime checks spill
-  under the REG:64 cap until it lands.
+  the cutile side).
 - The occupancy-hint-not-raising-REG-cap oddity (the entry-level
   occupancy hint capped REG at 64 even when a lower occupancy was
   requested).

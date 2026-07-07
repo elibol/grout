@@ -300,6 +300,14 @@ pub mod kernels {
     /// map [1, 1], num_tile_blocks = rows, BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
+                       // Row coordinate is cross-tensor (no by-construction
+                       // proof exists); the declared equality discharges it at
+                       // JIT time. Column axes discharge by construction
+                       // (literal-0 coordinate vs static N), so no axis-1
+                       // facts are needed.
+                       preconditions = (
+                           dim(out, 0) == dim(x, 0),
+                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -2486,6 +2494,18 @@ pub mod kernels {
     /// kv_heads * (D / CHUNK_D)).
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
+                       // All three residual coordinates are cross-tensor
+                       // (kv_head/d_chunk from out's map vs the scratch
+                       // tensors) with no by-construction proof; the declared
+                       // equalities discharge them at JIT time, which also
+                       // keeps the checks' register footprint at zero
+                       // (48 spills / STACK:424 without discharge under the
+                       // REG:64 cap).
+                       preconditions = (
+                           dim(out, 0) == dim(att_partial, 0),
+                           dim(out, 0) == dim(lse_partial, 0),
+                           dim(out, 2) == dim(att_partial, 2),
+                       ),
                        optimization_hints = (
                          sm_100 = (occupancy=4, max_divisibility=16,),
                          sm_120 = (occupancy=4, max_divisibility=16,),
@@ -2573,6 +2593,14 @@ pub mod kernels {
     /// identical shapes; BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
+                       // Cross-tensor row coordinates discharge via the
+                       // declared equalities; columns discharge by
+                       // construction (literal-0 vs static N). residual_out
+                       // shares out's index stream (brand-proven stores).
+                       preconditions = (
+                           dim(out, 0) == dim(residual, 0),
+                           dim(out, 0) == dim(x, 0),
+                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
