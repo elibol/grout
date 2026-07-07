@@ -2503,23 +2503,24 @@ impl Qwen3Engine {
 
                     // Input norm (layer 0: plain RMS norm; layers 1+: fused add + RMS norm
                     // that folds in the previous layer's residual add)
-                    // TODO(safe-kernels): switch to rms_norm_mapped_f16 once the
-                    // mapped kernel is GPU-validated in the eager path; the decode
-                    // graph stays on the legacy kernel until then.
                     if layer_idx == 0 {
                         let hidden_2d = bufs
                             .hidden
                             .view(&[1, d])
                             .map_err(|e| anyhow::anyhow!("view failed: {e:?}"))?;
-                        unsafe {
-                            rms_norm_f16(
-                                &hidden_2d,
-                                &*w.input_layernorm,
-                                (&mut bufs.normed).partition([1, d]),
-                                eps,
-                            )
-                        }
-                        .generics(vec![d.to_string(), RMS_BLOCK_HIDDEN.to_string()])
+                        let bs = d.next_power_of_two();
+                        rms_norm_mapped_f16(
+                            (&mut bufs.normed).partition([1, bs]).map([1, 1], 1),
+                            &hidden_2d,
+                            &*w.input_layernorm,
+                            eps,
+                        )
+                        .generics(vec![
+                            d.to_string(),
+                            bs.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime rms_norm failed: {e:?}"))?;
                     } else {
@@ -2601,18 +2602,24 @@ impl Qwen3Engine {
                             .map_err(|e| anyhow::anyhow!("view failed: {e:?}"))?;
 
                         // Fused Q+K norm
-                        unsafe {
-                            qk_norm_f16(
-                                &q_flat,
-                                &k_flat,
-                                &*w.q_norm,
-                                &*w.k_norm,
-                                (&mut bufs.qk_norm_flat).partition([1, head_dim]),
-                                eps,
-                                attn_heads as i32,
-                            )
-                        }
-                        .generics(vec![head_dim.to_string(), RMS_BLOCK.to_string()])
+                        let bs = head_dim.next_power_of_two();
+                        qk_norm_mapped_f16(
+                            (&mut bufs.qk_norm_flat)
+                                .partition([1, bs])
+                                .map([1, 1], (attn_heads + kv_heads) as u32),
+                            &q_flat,
+                            &k_flat,
+                            &*w.q_norm,
+                            &*w.k_norm,
+                            eps,
+                            attn_heads as i32,
+                        )
+                        .generics(vec![
+                            head_dim.to_string(),
+                            bs.to_string(),
+                            "1".to_string(),
+                            "1".to_string(),
+                        ])
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime qk_norm failed: {e:?}"))?;
 
@@ -3192,16 +3199,20 @@ impl Qwen3Engine {
                             .hidden
                             .view(&[1, d])
                             .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
+                        let bs = d.next_power_of_two();
                         s.record(
-                            unsafe {
-                                rms_norm_f16(
-                                    &hidden_2d,
-                                    &*w.input_layernorm,
-                                    (&mut bufs.normed).partition([1, d]),
-                                    eps,
-                                )
-                            }
-                            .generics(vec![d.to_string(), RMS_BLOCK_HIDDEN.to_string()]),
+                            rms_norm_mapped_f16(
+                                (&mut bufs.normed).partition([1, bs]).map([1, 1], 1),
+                                &hidden_2d,
+                                &*w.input_layernorm,
+                                eps,
+                            )
+                            .generics(vec![
+                                d.to_string(),
+                                bs.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ]),
                         )?;
                     } else {
                         s.record(
@@ -3285,19 +3296,25 @@ impl Qwen3Engine {
                             .map_err(|e| anyhow::anyhow!("view k_flat: {e:?}"))?;
 
                         // Fused Q+K norm
+                        let bs = head_dim.next_power_of_two();
                         s.record(
-                            unsafe {
-                                qk_norm_f16(
-                                    &q_flat,
-                                    &k_flat,
-                                    &*w.q_norm,
-                                    &*w.k_norm,
-                                    (&mut bufs.qk_norm_flat).partition([1, head_dim]),
-                                    eps,
-                                    attn_heads as i32,
-                                )
-                            }
-                            .generics(vec![head_dim.to_string(), RMS_BLOCK.to_string()]),
+                            qk_norm_mapped_f16(
+                                (&mut bufs.qk_norm_flat)
+                                    .partition([1, bs])
+                                    .map([1, 1], (attn_heads + kv_heads) as u32),
+                                &q_flat,
+                                &k_flat,
+                                &*w.q_norm,
+                                &*w.k_norm,
+                                eps,
+                                attn_heads as i32,
+                            )
+                            .generics(vec![
+                                head_dim.to_string(),
+                                bs.to_string(),
+                                "1".to_string(),
+                                "1".to_string(),
+                            ]),
                         )?;
 
                         // Slice Q/K norm results and reshape to 3D for RoPE
