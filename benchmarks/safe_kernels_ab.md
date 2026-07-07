@@ -104,12 +104,27 @@ equivalents and then ported or deleted:
 
 - `qk_norm_rope_kv_prefill_raw`, `qk_norm_rope_kv_decode_raw`
 - `add_rms_norm_decode_raw`
-- `fmha_prefill_gqa_lpt`, `fmha_prefill_gqa_lpt_split`
-- `prefill_splitk_reduce_merge`
-- `flash_decode.rs` (grouped decode attention)
-- `qk_rope_dynpos`
-- `lm_head_argmax_blocks`
-- `group_gemm_nt_desc`
+- `fmha_prefill_gqa_lpt`
+- `flash_decode.rs` (grouped decode attention, opt-in)
+- `lm_head_argmax_blocks` (opt-in)
+
+(`qk_rope_dynpos` has since been ported to the safe API;
+`flash_attn_f16`/`flash_attn_causal_f16` were deleted as unused.
+`fmha_prefill_gqa_lpt_split`, `prefill_splitk_reduce_merge`, and
+`group_gemm_nt_desc` are not referenced by the engine — the first two
+are dead code, the third is microbench-only.)
+
+## Qwen3-engine kernel census
+
+Counting only kernels the engine actually invokes (model.rs references):
+**20 safe / 6 unsafe** (+1 opt-in unsafe in flash_decode.rs). The six:
+the three raw fused kernels (default paths; portable once mixed-shape
+shared maps land), `fmha_decode_gqa_split_mapped` (unsafe only for its
+lse store — same gap), `fmha_prefill_gqa_lpt` (long-prefill profile;
+needs custom swizzle schedules), and `lm_head_argmax_blocks` (opt-in
+flag; dual f32/u32 outputs — same shared-map gap). With mixed-shape
+shared maps, the engine's default paths reach 0 unsafe kernels except
+LPT.
 
 Plus the partial case above: `fmha_decode_gqa_split_mapped` keeps an
 `unsafe fn` signature for its lse store until mixed-shape shared maps
