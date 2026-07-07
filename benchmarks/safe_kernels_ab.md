@@ -52,10 +52,14 @@ The dispatch retune landed BM=64/BN=32 for pp >= 512; after the
 compiler-side bounds-check hoisting fix, both forms share the same
 optima.
 
-**Decode — parity after declared preconditions.** -0.20% paired at
-tg=2048 (BN=32 / NUM_KV_SPLITS=16), i.e. within noise. The residual
-that had separated the arms was closed by the merge-kernel precondition
-work described below.
+**Decode — parity demonstrated at full check discharge.** -0.20% paired
+at tg=2048 (BN=32 / NUM_KV_SPLITS=16), i.e. within noise. That
+measurement was taken with the merge kernel's three residual checks
+discharged at JIT time; the current tree deliberately keeps those
+checks at runtime (see the check-placement policy below), so a ~1-2%
+decode residual is expected to return until the tracked tileiras
+register fix lands. Accepted trade: the residual is a codegen question,
+not a safety-machinery cost.
 
 ## Paper-relevant findings
 
@@ -69,30 +73,45 @@ work described below.
    not the specific shifted optima.
 
 2. **Bounds checks have a register-footprint cost channel beyond
-   placement.** The merge kernel's 3 in-place bounds checks caused
+   placement.** The merge kernel's 3 runtime bounds checks caused
    48 spill ops / STACK:424 under its REG:64 occupancy cap — the cost
    was not where the checks executed but the registers they pinned.
-   Discharging them via declared dim-equality preconditions took the
-   kernel to 0 spills / STACK:0 and closed the decode residual.
+   An experiment that discharged all three at JIT time took the kernel
+   to 0 spills / STACK:0 and closed the decode residual, isolating the
+   mechanism. The durable statement is mechanism-neutral: JIT-time
+   discharge eliminates the register channel; runtime checks carry it
+   until codegen stops spilling around them.
 
-On the precondition mechanism, an important framing note: this was
-**not** a missing discharge rule that had to be added to the checker.
-The checker's brand -> grid -> declared-equality chaining already
-existed; the fix was on the kernel side — the kernels declaring their
-host contracts as dim-equality preconditions
-(e.g. `dim(out, 0) == dim(x, 0)`), which the generated host launcher
-validates at launch time.
+## Check-placement policy
+
+The kernels give the compiler enough information to place checks at
+JIT time rather than runtime, in strict preference order:
+
+1. **Rewrite the kernel** (correctness-preserving) so checks are
+   JIT-time. Example: the norm kernels' column coordinates are
+   structurally constant (single tile, BLOCK_SIZE >= N), so they load
+   with the literal `0` — the checker discharges those axes against
+   the static N dim with no further facts.
+2. **Prefer by-construction evidence** — `Dim` / `with_bounds` /
+   `coord` branding, and same-view origins (an index minted from the
+   tensor it accesses discharges for free). Extending `with_bounds`
+   past rank 2 would bring the attention KV loops under this rung.
+3. **Runtime checks are a last resort**, aggressively optimized and
+   hoisted out of hot loops (loop-invariant and affine-induction
+   indices are checked once in the loop preheader).
 
 ## Verification boundary
 
 Every bounds check in the safe kernel family is one of:
 
-- **discharged** — proved by the checker from the partition map, grid
-  brand, or a declared (launch-validated) precondition;
-- **hoisted** — moved out of the hot loop by the compiler; or
-- **a named value-lattice case** — arithmetic-derived coordinates the
-  current lattice cannot relate: `row - num_q_rows` in qk_norm,
-  `s - pos` in kv_cache, `head / GROUP` in attention.
+- **discharged at JIT time** — static shapes, literal coordinates, or
+  same-view branded indices;
+- **hoisted** — a runtime check moved out of the hot loop; or
+- **a per-CTA or named value-lattice runtime check** — cross-tensor
+  row coordinates (one comparison per CTA in the norms and merge), and
+  arithmetic-derived coordinates the current lattice cannot relate:
+  `row - num_q_rows` in qk_norm, `s - pos` in kv_cache,
+  `head / GROUP` in attention.
 
 That is the precise claim; the family is **not** "fully statically
 verified".
@@ -133,7 +152,9 @@ land in cutile.
 ## Tracked follow-ups
 
 - tileiras For-region register pressure (SASS/cubin artifacts saved on
-  the cutile side).
+  the cutile side) — now also the gating item for reclaiming the last
+  ~1-2% decode residual, since the merge kernel's runtime checks spill
+  under the REG:64 cap until it lands.
 - The occupancy-hint-not-raising-REG-cap oddity (the entry-level
   occupancy hint capped REG at 64 even when a lower occupancy was
   requested).

@@ -300,15 +300,6 @@ pub mod kernels {
     /// map [1, 1], num_tile_blocks = rows, BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
-                       // Declared host contract: lets the checker discharge the
-                       // branded row coordinate against x's runtime row count
-                       // (pass-through coords; equality launch-validated by the
-                       // generated host launcher).
-                       preconditions = (
-                           dim(out, 0) == dim(x, 0),
-                           dim(out, 1) == dim(x, 1),
-                           dim(out, 1) == dim(w, 0),
-                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -324,8 +315,12 @@ pub mod kernels {
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
 
         for index in out.iter_indices() {
-            let (row, j) = index.components();
-            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
+            // Axis 1 has exactly one tile by construction (BLOCK_SIZE >= N),
+            // so the column coordinate is the literal 0: the checker
+            // discharges those axes at JIT time against the static N dim.
+            // The row check stays a single per-CTA runtime check.
+            let (row, _j) = index.components();
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, 0i32]);
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
 
             let sq: Tile<f32, { [1, BLOCK_SIZE] }> = tx * tx;
@@ -338,7 +333,7 @@ pub mod kernels {
             let inv_rms: f32 = tile_to_scalar(inv_rms);
             let inv_rms: Tile<f32, { [1, BLOCK_SIZE] }> = inv_rms.broadcast(tile_shape);
 
-            let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([j]).reshape(tile_shape);
+            let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([0i32]).reshape(tile_shape);
             let tw: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tw_f16);
             let tout: Tile<f32, { [1, BLOCK_SIZE] }> = tx * inv_rms * tw;
             let tout_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(tout);
@@ -2491,11 +2486,6 @@ pub mod kernels {
     /// kv_heads * (D / CHUNK_D)).
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
-                       preconditions = (
-                           dim(out, 0) == dim(att_partial, 0),
-                           dim(out, 0) == dim(lse_partial, 0),
-                           dim(out, 2) == dim(att_partial, 2),
-                       ),
                        optimization_hints = (
                          sm_100 = (occupancy=4, max_divisibility=16,),
                          sm_120 = (occupancy=4, max_divisibility=16,),
@@ -2583,16 +2573,6 @@ pub mod kernels {
     /// identical shapes; BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
-                       // Declared host contract (pass-through row coordinate);
-                       // residual_out shares out's index stream, so its stores
-                       // are brand-proven and need no precondition.
-                       preconditions = (
-                           dim(out, 0) == dim(residual, 0),
-                           dim(out, 0) == dim(x, 0),
-                           dim(out, 1) == dim(residual, 1),
-                           dim(out, 1) == dim(x, 1),
-                           dim(out, 1) == dim(w, 0),
-                       ),
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -2611,10 +2591,13 @@ pub mod kernels {
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
 
         for index in out.iter_indices_with(&residual_out) {
-            let (row, j) = index.components();
-            let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load([row, j]);
-            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
-            let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([j]).reshape(tile_shape);
+            // Column coordinates are the literal 0 (single tile: BLOCK_SIZE
+            // >= N), discharged at JIT time against the static N dim; the
+            // two row checks stay per-CTA runtime checks.
+            let (row, _j) = index.components();
+            let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load([row, 0i32]);
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, 0i32]);
+            let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([0i32]).reshape(tile_shape);
             let tr: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tr_f16);
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
             let combined: Tile<f32, { [1, BLOCK_SIZE] }> = tr + tx;
@@ -2809,19 +2792,19 @@ pub mod kernels {
             k_weight.partition(const_shape![BLOCK_SIZE]);
 
         for index in out.iter_indices() {
-            let (row, j) = index.components();
+            let (row, _j) = index.components();
             let is_q: bool = row < num_q_rows;
             let local_row: i32 = if is_q { row } else { row - num_q_rows };
 
             let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = if is_q {
-                q_part.load([local_row, j])
+                q_part.load([local_row, 0i32])
             } else {
-                k_part.load([local_row, j])
+                k_part.load([local_row, 0i32])
             };
             let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = if is_q {
-                qw_part.load([j]).reshape(tile_shape)
+                qw_part.load([0i32]).reshape(tile_shape)
             } else {
-                kw_part.load([j]).reshape(tile_shape)
+                kw_part.load([0i32]).reshape(tile_shape)
             };
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
 
