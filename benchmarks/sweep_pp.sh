@@ -49,6 +49,10 @@ MODEL_MAX_LEN="${MODEL_MAX_LEN:-$_DEFAULT_MAX_LEN}"
 GROUT_MAX_SEQ_LEN="${GROUT_MAX_SEQ_LEN:-}"
 SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-$MODEL_MAX_LEN}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-$MODEL_MAX_LEN}"
+# vLLM budgets gpu_memory_utilization x total VRAM; on a desktop GPU the
+# display compositor's share can push the 0.9 default into startup OOM
+# ("warming up sampler with 256 dummy requests"). Set 0.8 on such boxes.
+VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.9}"
 
 TS="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="$SCRIPT_DIR/results/sweep/$TS"
@@ -316,6 +320,7 @@ if [[ -n "$VLLM_PYTHON" ]] && "$VLLM_PYTHON" -c "import vllm" 2>/dev/null; then
             --reps "$RUN_BENCH_REPS" \
             --warmup-reps "$WARMUP_REPS" \
             --max-model-len "$VLLM_MAX_MODEL_LEN" \
+            --gpu-mem-util "$VLLM_GPU_MEM_UTIL" \
             --json "$JSONL" \
             --pp-label "$PP" \
             --mode cuda-graph \

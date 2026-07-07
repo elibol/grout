@@ -1,0 +1,119 @@
+# B200 (sm_100) bench bring-up runbook
+
+Order of operations for benchmarking the safe-kernel tree on a B200 box.
+The tree is arch-agnostic (kernels JIT per arch); what is arch-specific
+is *tuning*, and the sm_100 profiles in this repo predate the safe-kernel
+migration — re-derive them before quoting any number.
+
+## 0. Box prerequisites
+
+Directory layout is sibling-relative to the grout checkout:
+
+```
+dev/
+├── grout/            # branch safe-kernels
+├── cutile-rs/        # branch feat/mapped-partition-bounded-pipelined  (REQUIRED)
+├── hf_models/qwen3_4b/           # HF snapshot (config + safetensors + tokenizer)
+├── bench_envs/                   # only for baseline arms
+│   ├── vllm_env/                 # python venv with vllm
+│   ├── sglang_env/               # python venv with sglang
+│   └── .cache/                   # HF/vllm caches land here (must be writable)
+└── llama.cpp/                    # optional; disabled by default
+```
+
+`Cargo.toml`'s `[patch.crates-io]` points at `../cutile-rs` — the build
+fails without that checkout on the right branch. The safe kernels depend
+on that branch's mapped-partition API and JIT fixes; a crates.io release
+does not have them yet.
+
+## 1. Build + correctness smoke
+
+```
+cargo build --release
+cargo run --release -- --model ../hf_models/qwen3_4b \
+    --prompt "Explain KV caching in two sentences." --max-new-tokens 64
+```
+
+Read the output text for coherence (this catches wrong-result kernels
+that perf runs won't). First run JIT-compiles every kernel for sm_100 —
+slow once, cached after. `CUTILE_JIT_LOG=1` to watch kernels compile.
+
+## 2. Check-placement audit (before any perf number)
+
+The perf story assumes bounds checks are discharged at JIT time or
+hoisted out of hot loops. Confirm that holds under sm_100 codegen:
+
+1. `CUTILE_JIT_TIMING=1` on one prefill + one decode run; each kernel
+   prints `checks: discharged/hoisted/in-place`. Norms and the splitk
+   merge must show `in-place = 0`. Any kernel showing in-place checks
+   here that shows none on sm_120 is a compiler-backend gap — hand it
+   to the cutile-rs agent, don't tune around it.
+2. `./benchmarks/attn_ab.sh` — paired ablation, base vs
+   `CUTILE_DISABLE_CHECK_HOISTING=1`. A large positive nohoist delta is
+   the expected/healthy result (hoisting is load-bearing); ~0% means the
+   checks weren't in the hot path to begin with — verify with the JIT
+   counters before concluding anything.
+
+## 3. Tile retune (do not trust inherited shapes)
+
+Lesson from the migration, in `safe_kernels_ab.md`: **tile/hint configs
+are per-kernel-form, not per-op** — and they are also per-arch. The
+current `sweep_*_sm100.sh` profiles were tuned on B200 before the
+migration (partly on Qwen3-32B, LPT prefill path); treat them as a
+starting grid, not an answer.
+
+```
+./benchmarks/sweep_pp_tile.sh 18 128 512 2048 8192   # BM x BN per pp
+./benchmarks/sweep_tg_tile.sh                        # BN_DECODE x NUM_KV_SPLITS per tg
+```
+
+Both scripts rebuild before sweeping and abort on build failure. Update
+the winners into `benchmarks/sweep_pp_sm100.sh` /
+`benchmarks/sweep_tg_sm100.sh` (per-pp/per-tg env overrides live there;
+generic fallbacks in `sweep_pp.sh` are 5090-tuned).
+
+## 4. Canonical sweeps
+
+```
+./benchmarks/sweep_pp_sm100.sh                              # prefill scan, all engines
+./benchmarks/sweep_tg_sm100.sh                              # decode scan, all engines
+SWEEP_PP_VALUES="16384 32768" ./benchmarks/sweep_pp_sm100.sh  # long prefill
+```
+
+Baseline arms (vLLM/SGLang) run automatically when `bench_envs/` venvs
+exist. Results: `benchmarks/results/sweep/<timestamp>/{run.jsonl,summary_*.txt}`.
+
+Comparable decode metric across engines: `gen_tokens / (e2e_ms - prefill_ms)`
+(grout's `decode_ms` equals that span exactly; baselines don't emit
+`decode_ms`).
+
+## 5. Known gotchas (all hit in practice on the 5090)
+
+- **vLLM startup OOM** ("warming up sampler with 256 dummy requests"):
+  vLLM budgets `gpu_memory_utilization × total VRAM`; anything else
+  resident (e.g. a display) pushes the 0.9 default over. Set
+  `VLLM_GPU_MEM_UTIL=0.8`. Unlikely on a headless 180 GB B200.
+- **nsys on decode**: default graph tracing hides in-graph kernels; use
+  `--cuda-graph-trace=node` to itemize them.
+- **Op-share profiling**: `--quiet` suppresses the profile report — drop
+  it when grepping `GROUT_PROFILE_OPS=1` output. Values are padded
+  (`avg_us=   67.26`); match across spaces, don't split on fields.
+- **Never edit a sweep script while it is running** — bash reads the
+  file incrementally and shifted content mid-run corrupts the sweep.
+- **A/B claims need the paired, order-alternating protocol**
+  (`attn_ab.sh` shape). Sequential arm sweeps drift; single-digit-%
+  deltas from unpaired runs are not findings.
+- One warmup rep is enough for steady-state (`--warmup-reps`, default 1
+  in grout; sweeps use 3), but the *first-ever* run pays JIT cost —
+  never let it into a measured cell.
+
+## 6. Deliverables to bring back
+
+- Retuned `sweep_pp_sm100.sh` / `sweep_tg_sm100.sh` profiles.
+- JIT check counters (step 2) for the kernel family on sm_100.
+- The three sweep result dirs (pp / tg / long-pp), all engines.
+- Op-share profiles at pp = 512 / 8192 / 32768 and a decode nsys
+  (`--cuda-graph-trace=node`) — the cuBLAS-vs-cuTile share split is a
+  paper number and arch-dependent.
+- Anything where sm_100 behaves differently from sm_120 in the check
+  audit or the ablation — that's cutile-rs agent material.
