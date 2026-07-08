@@ -280,7 +280,7 @@ fi
 # --------------------------------------------------------------------------
 log "Benchmark: SGLang (no-radix)"
 SGLANG_PYTHON="$(venv_python sglang_env)"
-if [[ -n "$SGLANG_PYTHON" ]] && "$SGLANG_PYTHON" -c "import sglang" 2>/dev/null; then
+if [[ "${SWEEP_ENABLE_BASELINES:-1}" == 1 ]] && [[ -n "$SGLANG_PYTHON" ]] && "$SGLANG_PYTHON" -c "import sglang" 2>/dev/null; then
     for PP in "${PP_VALUES[@]}"; do
         RUN_BENCH_REPS="$(bench_reps_for_pp "$PP")"
         echo ""
@@ -308,7 +308,7 @@ fi
 # --------------------------------------------------------------------------
 log "Benchmark: vLLM (cuda-graph, prefix-cache OFF)"
 VLLM_PYTHON="$(venv_python vllm_env)"
-if [[ -n "$VLLM_PYTHON" ]] && "$VLLM_PYTHON" -c "import vllm" 2>/dev/null; then
+if [[ "${SWEEP_ENABLE_BASELINES:-1}" == 1 ]] && [[ -n "$VLLM_PYTHON" ]] && "$VLLM_PYTHON" -c "import vllm" 2>/dev/null; then
     for PP in "${PP_VALUES[@]}"; do
         RUN_BENCH_REPS="$(bench_reps_for_pp "$PP")"
         echo ""
