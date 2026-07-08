@@ -107,6 +107,27 @@ Comparable decode metric across engines: `gen_tokens / (e2e_ms - prefill_ms)`
   in grout; sweeps use 3), but the *first-ever* run pays JIT cost —
   never let it into a measured cell.
 
+## 5b. Kernel-level attention comparison (FlashInfer / trtllm-gen)
+
+`benchmarks/bench_flashinfer_attn.py` benches FlashInfer's dense
+single-request kernels at grout's Qwen3 shapes (needs a venv with
+flashinfer; JIT-compiles on first call). On sm_100 also add the
+trtllm-gen arms via the batch wrappers with batch=1
+(`trtllm_batch_context_with_kv_cache` / `trtllm_batch_decode_with_kv_cache`,
+paged KV with page_size = kv_len as the degenerate dense case) — that
+backend is Blackwell-only and is the comparison that matters there.
+
+Grout's side: prefill from the `GROUT_PROFILE_SYNC_OPS=1` Attention row;
+decode from nsys (`--cuda-graph-trace=node`) per-launch times for
+`fmha_decode_gqa_split_mapped` + `splitk_reduce_merge_mapped` (sum the
+pair — flashinfer's decode call merges internally).
+
+Method caveat: sync-ops attribution carries per-op sync overhead that a
+CUDA-event kernel loop does not. For externally quotable numbers, time
+both sides with nsys. 5090 reference (2026-07-08, method-skewed as
+above): FA2 prefill 39.7/258/2813 us at 512/2048/8192 vs grout sync-ops
+47.9/377/- ; FA2 decode 12.3/10.4/16.4 us at kv=512/2048/8192.
+
 ## 6. Deliverables to bring back
 
 - Retuned `sweep_pp_sm100.sh` / `sweep_tg_sm100.sh` profiles.
