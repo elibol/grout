@@ -44,15 +44,45 @@ The perf story assumes bounds checks are discharged at JIT time or
 hoisted out of hot loops. Confirm that holds under sm_100 codegen:
 
 1. `CUTILE_JIT_TIMING=1` on one prefill + one decode run; each kernel
-   prints `checks: discharged/hoisted/in-place`. Norms and the splitk
-   merge must show `in-place = 0`. Any kernel showing in-place checks
-   here that shows none on sm_120 is a compiler-backend gap — hand it
-   to the cutile-rs agent, don't tune around it.
+   prints `checks_discharged/_hoisted/_in_place` counters. Norms and the
+   splitk merge must show `checks_in_place=0`; the merge specifically
+   must show `checks_discharged=5 checks_hoisted=0 checks_in_place=0`
+   (2 lse + 3 att axes through the bounded `with_bounds`/`coord` path —
+   these are JIT-time proofs, so the counters are arch-independent; if
+   they differ, the *build* is stale, not the backend). Any kernel
+   showing in-place checks here that shows none on sm_120 is a
+   compiler-backend gap — hand it to the cutile-rs agent, don't tune
+   around it.
 2. `./benchmarks/attn_ab.sh` — paired ablation, base vs
    `CUTILE_DISABLE_CHECK_HOISTING=1`. A large positive nohoist delta is
    the expected/healthy result (hoisting is load-bearing); ~0% means the
    checks weren't in the hot path to begin with — verify with the JIT
    counters before concluding anything.
+
+## 2b. Spill audit (the second cost channel)
+
+Discharged checks are necessary but not sufficient: the decode residual
+on the 5090 was *register/stack pressure* under occupancy caps, not
+check instructions, and tileiras allocates per-arch — sm_100 can spill
+where sm_120 does not. After one prefill + one decode run, JIT-compiled
+cubins sit in `$TMPDIR` as `<uuid>.cubin`; find a kernel's cubin by
+symbol and check resources:
+
+```
+for f in $(ls -t ${TMPDIR:-/tmp}/*.cubin | head -40); do
+  cuobjdump -symbols "$f" | grep -q splitk_reduce_merge_mapped && echo "$f" && break
+done
+cuobjdump -res-usage "$f"        # expect REG:64 STACK:0 LOCAL:0 for the merge
+nvdisasm -c "$f" | grep -cE "LDL|STL"   # expect 0
+```
+
+sm_120 reference (2026-07-08, bounded variant): merge REG:64 STACK:0,
+zero LDL/STL. Repeat for `fmha_prefill` / `fmha_decode_gqa_split_mapped`
+at the shapes the retune (step 3) selects — spill counts are
+tile-shape-dependent, so audit the *winning* shapes, not the inherited
+ones. Nonzero STACK or a three-digit LDL/STL count on a hot kernel is a
+cutile-rs-agent handoff, with the cubin and the exact generics line from
+`CUTILE_JIT_TIMING`.
 
 ## 3. Tile retune (do not trust inherited shapes)
 
