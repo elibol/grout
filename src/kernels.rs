@@ -2483,24 +2483,17 @@ pub mod kernels {
 
     /// Safe-API port of splitk_reduce_merge: the output is a mapped partition
     /// ([1, GROUP, CHUNK_D] tiles on a (kv_heads, 1, D/CHUNK_D) logical grid,
-    /// one index per CTA), scratch loads are bounds-checked
-    /// `load_pipelined::<LATENCY>`, unchecked_accesses=false — no unsafe.
-    /// Host contract: out partitioned [1, GROUP, CHUNK_D].map([1, 1, 1],
-    /// kv_heads * (D / CHUNK_D)).
+    /// one index per CTA), scratch loads are proof-carrying bounded
+    /// `load_pipelined::<LATENCY>` (`with_bounds` + `coord`),
+    /// unchecked_accesses=false — no unsafe. Every load check discharges at
+    /// JIT time (axes 0/2 brand-match `num_tiles(&out, ..)` bounds, axis 1 is
+    /// a constant inside the static 1-tile grid), keeping the checks'
+    /// register footprint at zero (48 spills / STACK:424 without discharge
+    /// under the REG:64 cap). Host contract: out partitioned
+    /// [1, GROUP, CHUNK_D].map([1, 1, 1], kv_heads * (D / CHUNK_D)), and the
+    /// scratch tensors cover out's kv_head/D extents.
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
-                       // All three residual coordinates are cross-tensor
-                       // (kv_head/d_chunk from out's map vs the scratch
-                       // tensors) with no by-construction proof; the declared
-                       // equalities discharge them at JIT time, which also
-                       // keeps the checks' register footprint at zero
-                       // (48 spills / STACK:424 without discharge under the
-                       // REG:64 cap).
-                       preconditions = (
-                           dim(out, 0) == dim(att_partial, 0),
-                           dim(out, 0) == dim(lse_partial, 0),
-                           dim(out, 2) == dim(att_partial, 2),
-                       ),
                        optimization_hints = (
                          sm_100 = (occupancy=4, max_divisibility=16,),
                          sm_120 = (occupancy=4, max_divisibility=16,),
@@ -2518,10 +2511,12 @@ pub mod kernels {
         att_partial: &Tensor<f16, { [-1, NS_GROUP, D] }>,
         lse_partial: &Tensor<f32, { [-1, NS_GROUP] }>,
     ) {
-        let lse_part: Partition<f32, { [1, NS_GROUP] }> =
-            lse_partial.partition(const_shape![1, NS_GROUP]);
-        let att_part: Partition<f16, { [1, NS_GROUP, CHUNK_D] }> =
-            att_partial.partition(const_shape![1, NS_GROUP, CHUNK_D]);
+        let lse_part: BoundedPartition<f32, { [1, NS_GROUP] }> = lse_partial
+            .partition(const_shape![1, NS_GROUP])
+            .with_bounds((num_tiles(&out, 0), Dim::new(1)));
+        let att_part: BoundedPartition<f16, { [1, NS_GROUP, CHUNK_D] }> = att_partial
+            .partition(const_shape![1, NS_GROUP, CHUNK_D])
+            .with_bounds((num_tiles(&out, 0), Dim::new(1), num_tiles(&out, 2)));
         let transpose_2d: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
             dims: &[1i32, 0i32],
         };
@@ -2535,7 +2530,7 @@ pub mod kernels {
             // This CTA's [1, NS_GROUP] LSE tile → [GROUP, NUM_KV_SPLITS]
             // (split-major layout; see splitk_reduce_merge).
             let lse_tile: Tile<f32, { [1, NS_GROUP] }> =
-                lse_part.load_pipelined::<LATENCY>([kv_head_id, 0i32]);
+                lse_part.load_pipelined::<LATENCY>(coord((kv_head_id, 0i32)));
             let lse_ns_g: Tile<f32, { [NUM_KV_SPLITS, GROUP] }> =
                 lse_tile.reshape(const_shape![NUM_KV_SPLITS, GROUP]);
             let lse_tile: Tile<f32, { [GROUP, NUM_KV_SPLITS] }> = permute(lse_ns_g, transpose_2d);
@@ -2559,7 +2554,7 @@ pub mod kernels {
 
             // This CTA's CHUNK_D slice → [GROUP, NUM_KV_SPLITS, CHUNK_D].
             let att_tile: Tile<f16, { [1, NS_GROUP, CHUNK_D] }> =
-                att_part.load_pipelined::<LATENCY>([kv_head_id, 0i32, d_chunk_id]);
+                att_part.load_pipelined::<LATENCY>(coord((kv_head_id, 0i32, d_chunk_id)));
             let att_ns_g_d: Tile<f16, { [NUM_KV_SPLITS, GROUP, CHUNK_D] }> =
                 att_tile.reshape(const_shape![NUM_KV_SPLITS, GROUP, CHUNK_D]);
             let att_g_ns_d: Tile<f16, { [GROUP, NUM_KV_SPLITS, CHUNK_D] }> =
