@@ -95,12 +95,16 @@ echo
 # Per-cell runner: returns decode_ms median from the 10 timed reps.
 run_one() {
     local tg="$1" bn="$2" nks="$3"
+    local max_seq_len=$((PP_LEN + tg))
+    (( max_seq_len < 4096 )) && max_seq_len=4096
     GROUT_ATTN_BN_DECODE="$bn" \
         GROUT_FMHA_NUM_KV_SPLITS="$nks" \
         "$GROUT_DIR/target/release/grout_bench" \
         --model "$MODEL_HF" \
         --prompt-file "$PROMPT_FILE" \
+        --raw-prompt \
         --max-new-tokens "$tg" \
+        --max-seq-len "$max_seq_len" \
         --reps "$BENCH_REPS" --warmup-reps "$WARMUP_REPS" --ignore-eos --quiet 2>&1 \
     | grep -E '^\s+\[timed\]' \
     | awk -F'decode_ms=' '{print $2}' | awk -F',' '{print $1}' \
