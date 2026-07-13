@@ -165,3 +165,16 @@ land in cutile.
   arithmetic-derived coordinates (the three named cases above).
 - B200/sm_100 retune with the same per-arm — now single-arm — protocol
   (`sweep_pp_tile.sh` / `sweep_tg_tile.sh`).
+- Safe nested subpartitioning (cutile-rs ask). Chunked mapped traversal
+  of wide rows fails both ways today: `map([1, num_chunks], rows)` is
+  not row-local, and the row-local `map([rows, 1], rows)` persistent
+  walk produces catastrophic codegen (RmsNorm REG up to 211 / STACK 224;
+  AddRmsNorm STACK 80; 9.5 ms → 42.4 ms combined vs the flat historical
+  form at REG 94 / STACK 0). Needed shape: a CTA takes a coarse mapped
+  `[1, N]` row-ownership token, then derives `[1, BS]` mutable child
+  views (`subpartition`) iterated by an ordinary inner loop, with child
+  stores inheriting the parent row's ownership/disjointness proof.
+  Acceptance bar: codegen parity with the flat form (AddRmsNorm ~REG:94,
+  STACK:0, no local loads/stores). Experiment reverted from the grout
+  tree; another instance of the register/stack cost channel in
+  finding 2.
