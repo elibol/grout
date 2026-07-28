@@ -2,7 +2,8 @@ use crate::config::{GenerationConfig, Qwen3Config};
 use crate::cublas;
 use crate::flash_decode::attention_decode_kernel_grouped;
 use crate::kernels::{
-    KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_raw_f16,
+    KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_bounded_f16,
+    add_rms_norm_decode_raw_f16,
     add_rms_norm_mapped_f16, argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
     flash_attn_causal_seq_dynpos_mapped_f16, flash_attn_causal_seq_mapped_f16, fmha_causal_mapped,
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
@@ -2467,20 +2468,39 @@ impl Qwen3Engine {
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime rms_norm failed: {e:?}"))?;
                     } else {
-                        unsafe {
-                            add_rms_norm_decode_raw_f16(
-                                bufs.hidden_after_attn.device_pointer().clone(),
-                                bufs.ff_down.device_pointer().clone(),
-                                w.input_layernorm.device_pointer().clone(),
-                                bufs.normed.device_pointer().clone(),
-                                bufs.hidden.device_pointer().clone(),
+                        if env_bool_or("GROUT_BOUNDED_DECODE_NORM", false) {
+                            add_rms_norm_decode_bounded_f16(
+                                &bufs.hidden_after_attn,
+                                &bufs.ff_down,
+                                &w.input_layernorm,
+                                (&mut bufs.normed).partition([1usize, d]),
+                                (&mut bufs.hidden).partition([1usize, d]),
                                 eps,
                             )
+                            .generics(vec![d.to_string(), rms_block.to_string()])
+                            .grid((1u32, 1u32, 1u32))
+                            .sync_on(stream)
+                            .map_err(|e| {
+                                anyhow::anyhow!("prime add_rms_norm input failed: {e:?}")
+                            })?;
+                        } else {
+                            unsafe {
+                                add_rms_norm_decode_raw_f16(
+                                    bufs.hidden_after_attn.device_pointer().clone(),
+                                    bufs.ff_down.device_pointer().clone(),
+                                    w.input_layernorm.device_pointer().clone(),
+                                    bufs.normed.device_pointer().clone(),
+                                    bufs.hidden.device_pointer().clone(),
+                                    eps,
+                                )
+                            }
+                            .generics(vec![d.to_string(), rms_block.to_string()])
+                            .grid((1u32, 1u32, 1u32))
+                            .sync_on(stream)
+                            .map_err(|e| {
+                                anyhow::anyhow!("prime add_rms_norm input failed: {e:?}")
+                            })?;
                         }
-                        .generics(vec![d.to_string(), rms_block.to_string()])
-                        .grid((1u32, 1u32, 1u32))
-                        .sync_on(stream)
-                        .map_err(|e| anyhow::anyhow!("prime add_rms_norm input failed: {e:?}"))?;
                     }
 
                     // QKV GEMV (cuBLAS uses raw device pointers + explicit m/k)
@@ -2894,20 +2914,35 @@ impl Qwen3Engine {
                     .map_err(|e| anyhow::anyhow!("prime o_proj gemv failed: {e:?}"))?;
 
                     // Add + RMS norm
-                    unsafe {
-                        add_rms_norm_decode_raw_f16(
-                            bufs.hidden.device_pointer().clone(),
-                            bufs.attn_proj.device_pointer().clone(),
-                            w.post_attention_layernorm.device_pointer().clone(),
-                            bufs.ff_normed.device_pointer().clone(),
-                            bufs.hidden_after_attn.device_pointer().clone(),
+                    if env_bool_or("GROUT_BOUNDED_DECODE_NORM", false) {
+                        add_rms_norm_decode_bounded_f16(
+                            &bufs.hidden,
+                            &bufs.attn_proj,
+                            &w.post_attention_layernorm,
+                            (&mut bufs.ff_normed).partition([1usize, d]),
+                            (&mut bufs.hidden_after_attn).partition([1usize, d]),
                             eps,
                         )
+                        .generics(vec![d.to_string(), rms_block.to_string()])
+                        .grid((1u32, 1u32, 1u32))
+                        .sync_on(stream)
+                        .map_err(|e| anyhow::anyhow!("prime add_rms_norm failed: {e:?}"))?;
+                    } else {
+                        unsafe {
+                            add_rms_norm_decode_raw_f16(
+                                bufs.hidden.device_pointer().clone(),
+                                bufs.attn_proj.device_pointer().clone(),
+                                w.post_attention_layernorm.device_pointer().clone(),
+                                bufs.ff_normed.device_pointer().clone(),
+                                bufs.hidden_after_attn.device_pointer().clone(),
+                                eps,
+                            )
+                        }
+                        .generics(vec![d.to_string(), rms_block.to_string()])
+                        .grid((1u32, 1u32, 1u32))
+                        .sync_on(stream)
+                        .map_err(|e| anyhow::anyhow!("prime add_rms_norm failed: {e:?}"))?;
                     }
-                    .generics(vec![d.to_string(), rms_block.to_string()])
-                    .grid((1u32, 1u32, 1u32))
-                    .sync_on(stream)
-                    .map_err(|e| anyhow::anyhow!("prime add_rms_norm failed: {e:?}"))?;
 
                     // Gate+Up GEMV
                     cublas::GemvInPlace {

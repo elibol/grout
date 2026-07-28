@@ -154,6 +154,46 @@ Plus the partial case above: `fmha_decode_gqa_split_mapped` keeps an
 `unsafe fn` signature for its lse store until mixed-shape shared maps
 land in cutile.
 
+## Safe bounded mutable store (2026-07-28 adoption)
+
+cutile-rs `feat/mapped-partition-bounded-pipelined` now provides
+`PartitionMut::with_bounds` -> `BoundedPartitionMut::store(tile, coord(..))`
+(rank 2 and 3) with the bounds check hoisted to the generated launcher.
+Adopted in `add_rms_norm_decode_bounded_f16`, the safe port of the decode
+step's fused residual-add + RMSNorm (env `GROUT_BOUNDED_DECODE_NORM=1`;
+raw kernel stays the default until the validation gap below is resolved):
+
+- JIT counters 13/0/0 (discharged/hoisted/in-place) — every access
+  proof-carrying, zero in-kernel checks.
+- Whole-kernel decode parity in the CUDA graph: 179.4/179.1 vs raw
+  178.98/179.41 tok/s (paired, tg=48 cells); STACK:0, zero LDL/STL.
+- Elementwise-exact vs the raw kernel (tests/kernels.rs).
+- Residual unsafety: `Tensor::partition_mut` construction only (two
+  narrow `unsafe {}` blocks); making that constructor safe is part of
+  the cutile-rs owned-axis work.
+
+Findings for cutile-rs from the adoption:
+
+1. **Launch-validation gap.** A parameter-shape mismatch (`[-1, N]`
+   declared vs `[1, N]` host partition) raised a launch error in the
+   test harness path but ran with silent corruption in the engine's
+   decode prime/graph path. Hoisted launch checks must be enforced
+   uniformly, including under CUDA graph capture.
+2. **Owned-axis acceptance spec.** `add_rms_norm_rows_bounded_spec_f16`
+   (+ ignored test `rowwise_bounded_spec_jit_error`) is the fully safe
+   row-wise kernel gated on grid-axis branding. Current JIT error, which
+   is the acceptance criterion: "bounded partition coordinate axis 0
+   must come from iterating the matching dimension or be a constant
+   within the axis's static tile grid".
+
+What the machinery unlocks next: `qk_norm_rope_kv_decode_raw` (same
+single-row decode pattern; rope pairing and the device-scalar KV
+position stay lattice/runtime-checked) is grout-side work now. The lse
+store in `fmha_decode_gqa_split_mapped` and `lm_head_argmax_blocks`
+need the mapped-index/grid-axis brand bridge (owned-axis) since their
+store rows derive from the map or CTA id; the prefill raw fused kernels
+and LPT remain gated as before.
+
 ## Tracked follow-ups
 
 - tileiras For-region register pressure (SASS/cubin artifacts saved on
