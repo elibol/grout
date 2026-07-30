@@ -183,22 +183,30 @@ unchanged at REG:64 STACK:0 zero LDL/STL, bounded decode norm still
 elementwise-exact. These are the RMSNorm production measurements the
 token-threading design doc called for.
 
-Findings for cutile-rs from the adoption:
+Findings — CORRECTED 2026-07-30 after joint diagnosis with cutile-rs:
 
-1. **Launch-validation gap — still reproduces after the token-threading
-   fixes (re-verified 2026-07-30).** A parameter-shape mismatch raised
-   a launch error in the test harness path but runs with silent
-   corruption in the engine's decode prime/graph path (repro: declare
-   `&mut Tensor<f16, {[1, N]}>`, pass a `[1, N/2]` host partition, run
-   the decode CUDA-graph path — degenerate output, no error). Hoisted
-   launch checks must be enforced uniformly, including under CUDA graph
-   capture.
-2. **Owned-axis acceptance spec.** `add_rms_norm_rows_bounded_spec_f16`
-   (+ ignored test `rowwise_bounded_spec_jit_error`) is the fully safe
-   row-wise kernel gated on grid-axis branding. Current JIT error, which
-   is the acceptance criterion: "bounded partition coordinate axis 0
-   must come from iterating the matching dimension or be a constant
-   within the axis's static tile grid".
+1. **RETRACTED: there is no launch-validation gap in cutile-rs.**
+   cutile-rs has exactly one launch path and it validates everywhere,
+   including under CUDA graph capture. The observed "silent corruption"
+   was grout-side: the prime-pass launch error fired correctly
+   (`Launch("out partition shape mismatch. Expected [1, 2560], got
+   [1, 1280]")`), grout converted it into a stderr warning + fallback,
+   and the eager decode fallback path itself produces degenerate output
+   (pre-existing grout bug). Two grout follow-ups replace the retracted
+   ask: (a) fix or fail-loud the eager decode fallback; (b) the
+   GROUT_BOUNDED_DECODE_NORM toggle currently covers only the prime
+   pass — the capture block still records the raw kernel at all three
+   norm sites (input / post-attn / final epilogue), so the earlier
+   "decode-graph parity" A/B was raw-vs-raw and is retracted as
+   vacuous; the elementwise unit test remains the numerics evidence.
+   Extending the dispatch to all six sites is queued with the
+   qk_norm_rope_kv_decode port.
+
+2. **Owned-axis acceptance spec (unchanged, still the ask).**
+   `add_rms_norm_rows_bounded_spec_f16` (+ ignored test
+   `rowwise_bounded_spec_jit_error`) still fails JIT with: "bounded
+   partition coordinate axis 0 must come from iterating the matching
+   dimension or be a constant within the axis's static tile grid".
 
 What the machinery unlocks next: `qk_norm_rope_kv_decode_raw` (same
 single-row decode pattern; rope pairing and the device-scalar KV
