@@ -172,13 +172,27 @@ raw kernel stays the default until the validation gap below is resolved):
   narrow `unsafe {}` blocks); making that constructor safe is part of
   the cutile-rs owned-axis work.
 
+**Token-threading verification (2026-07-30).** The store-ordering
+soundness fixes (resource tokens threaded through loops incl. the
+persistent mapped-partition loop, serialization of non-distinct-index
+stores) verified clean at whole-engine scope: output text identical to
+pre-fix, decode 167.8-177.6 tok/s (parity within drift vs ~179),
+prefill sync-ops Attention 43.0 us / AddRmsNorm 13.5 / RmsNorm 11.4 at
+pp=512 (no regression vs 47.9 pre-fix reference), merge kernel
+unchanged at REG:64 STACK:0 zero LDL/STL, bounded decode norm still
+elementwise-exact. These are the RMSNorm production measurements the
+token-threading design doc called for.
+
 Findings for cutile-rs from the adoption:
 
-1. **Launch-validation gap.** A parameter-shape mismatch (`[-1, N]`
-   declared vs `[1, N]` host partition) raised a launch error in the
-   test harness path but ran with silent corruption in the engine's
-   decode prime/graph path. Hoisted launch checks must be enforced
-   uniformly, including under CUDA graph capture.
+1. **Launch-validation gap — still reproduces after the token-threading
+   fixes (re-verified 2026-07-30).** A parameter-shape mismatch raised
+   a launch error in the test harness path but runs with silent
+   corruption in the engine's decode prime/graph path (repro: declare
+   `&mut Tensor<f16, {[1, N]}>`, pass a `[1, N/2]` host partition, run
+   the decode CUDA-graph path — degenerate output, no error). Hoisted
+   launch checks must be enforced uniformly, including under CUDA graph
+   capture.
 2. **Owned-axis acceptance spec.** `add_rms_norm_rows_bounded_spec_f16`
    (+ ignored test `rowwise_bounded_spec_jit_error`) is the fully safe
    row-wise kernel gated on grid-axis branding. Current JIT error, which
