@@ -8,7 +8,7 @@ use crate::kernels::{
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
     fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
-    qk_norm_rope_kv_decode_raw_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_mapped_f16,
+    qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_mapped_f16,
     rms_norm_mapped_f16, rope_seq_dynpos_f16, rope_seq_f16, silu_mul_2d_f16,
     splitk_reduce_merge_mapped,
 };
@@ -1756,15 +1756,21 @@ impl Qwen3Engine {
                 };
                 let pos = unsafe { api::zeros::<u32>(&[1]).execute(ctx)? };
                 let w = &self.layers[0].weights;
+                let qkv_1d = qkv
+                    .view(&[qkv_width])
+                    .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
+                let q_out_2d = q_out
+                    .view(&[attn_heads + kv_heads, head_dim])
+                    .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
                 unsafe {
-                    qk_norm_rope_kv_decode_raw_f16(
-                        qkv.device_pointer().clone(),
-                        w.q_norm.device_pointer().clone(),
-                        w.k_norm.device_pointer().clone(),
-                        self.inv_freq.device_pointer().clone(),
-                        q_out.device_pointer().clone(),
-                        k_cache.device_pointer().clone(),
-                        v_cache.device_pointer().clone(),
+                    qk_norm_rope_kv_decode_f16(
+                        &qkv_1d,
+                        &w.q_norm,
+                        &w.k_norm,
+                        &self.inv_freq,
+                        &q_out_2d,
+                        &k_cache,
+                        &v_cache,
                         &pos,
                         self.cfg.rms_norm_eps,
                         attn_heads as i32,
@@ -2508,21 +2514,23 @@ impl Qwen3Engine {
                         .map_err(|e| anyhow::anyhow!("slice failed: {e:?}"))?;
 
                     if fuse_qk_rope_kv_decode {
-                        unsafe {
-                            qk_norm_rope_kv_decode_raw_f16(
-                                bufs.qkv.device_pointer().clone(),
-                                w.q_norm.device_pointer().clone(),
-                                w.k_norm.device_pointer().clone(),
-                                self.inv_freq.device_pointer().clone(),
-                                bufs.qk_rope.device_pointer().clone(),
-                                k_cache.device_pointer().clone(),
-                                v_cache.device_pointer().clone(),
-                                &position,
-                                eps,
-                                attn_heads as i32,
-                                kv_heads as i32,
-                            )
-                        }
+                        let qk_rope_2d = bufs
+                            .qk_rope
+                            .view(&[attn_heads + kv_heads, head_dim])
+                            .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
+                        qk_norm_rope_kv_decode_f16(
+                            &qkv_1d,
+                            &w.q_norm,
+                            &w.k_norm,
+                            &self.inv_freq,
+                            &qk_rope_2d,
+                            &*k_cache,
+                            &*v_cache,
+                            &position,
+                            eps,
+                            attn_heads as i32,
+                            kv_heads as i32,
+                        )
                         .generics(vec![
                             head_dim.to_string(),
                             (head_dim / 2).to_string(),
@@ -3103,22 +3111,24 @@ impl Qwen3Engine {
                         .map_err(|e| anyhow::anyhow!("slice v: {e:?}"))?;
 
                     if fuse_qk_rope_kv_decode {
+                        let qk_rope_2d = bufs
+                            .qk_rope
+                            .view(&[attn_heads + kv_heads, head_dim])
+                            .map_err(|e| anyhow::anyhow!("view: {e:?}"))?;
                         s.record(
-                            unsafe {
-                                qk_norm_rope_kv_decode_raw_f16(
-                                    bufs.qkv.device_pointer().clone(),
-                                    w.q_norm.device_pointer().clone(),
-                                    w.k_norm.device_pointer().clone(),
-                                    self.inv_freq.device_pointer().clone(),
-                                    bufs.qk_rope.device_pointer().clone(),
-                                    k_cache.device_pointer().clone(),
-                                    v_cache.device_pointer().clone(),
-                                    &position,
-                                    eps,
-                                    attn_heads as i32,
-                                    kv_heads as i32,
-                                )
-                            }
+                            qk_norm_rope_kv_decode_f16(
+                                &qkv_1d,
+                                &w.q_norm,
+                                &w.k_norm,
+                                &self.inv_freq,
+                                &qk_rope_2d,
+                                &*k_cache,
+                                &*v_cache,
+                                &position,
+                                eps,
+                                attn_heads as i32,
+                                kv_heads as i32,
+                            )
                             .generics(vec![
                                 head_dim.to_string(),
                                 (head_dim / 2).to_string(),

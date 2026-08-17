@@ -195,3 +195,139 @@ fn rowwise_bounded_spec_jit_error() -> Result<()> {
     r.map(|_| ())
         .map_err(|e| anyhow::anyhow!("grid-rowed safe kernel must JIT+launch clean: {e:?}"))
 }
+
+/// Elementwise A/B: the safe fused decode qk_norm+rope+kv kernel must match
+/// the raw kernel exactly on random data across the Q, K-cache and V-cache
+/// outputs (and leave unwritten cache slots untouched).
+#[test]
+fn qk_norm_rope_kv_decode_safe_matches_reference() -> Result<()> {
+    match Device::device_count() {
+        Ok(count) if count > 0 => {}
+        _ => return Ok(()),
+    }
+    use grout::kernels::qk_norm_rope_kv_decode_f16;
+    const D: usize = 128;
+    const HALF_D: usize = 64;
+    const MAX_SEQ: usize = 32;
+    const NQ: usize = 4;
+    const NKV: usize = 2;
+    const POS: u32 = 5;
+    let total = NQ + NKV;
+    let qkv_len = (NQ + 2 * NKV) * D;
+
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
+    let gen_f16 = |seed: u32, n: usize| -> Arc<Vec<f16>> {
+        let mut v = Vec::with_capacity(n);
+        let mut x = seed;
+        for _ in 0..n {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            v.push(f16::from_f32(((x >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0));
+        }
+        Arc::new(v)
+    };
+    let inv_host: Arc<Vec<f32>> = Arc::new(
+        (0..HALF_D)
+            .map(|i| 1.0f32 / 10000f32.powf(2.0 * i as f32 / D as f32))
+            .collect(),
+    );
+
+    let qkv = Arc::new(api::copy_host_vec_to_device(&gen_f16(1, qkv_len)).reshape(&[qkv_len]).sync_on(&stream)?);
+    let qw = Arc::new(api::copy_host_vec_to_device(&gen_f16(2, D)).reshape(&[D]).sync_on(&stream)?);
+    let kw = Arc::new(api::copy_host_vec_to_device(&gen_f16(3, D)).reshape(&[D]).sync_on(&stream)?);
+    let inv = Arc::new(api::copy_host_vec_to_device(&inv_host).reshape(&[HALF_D]).sync_on(&stream)?);
+    let pos = Arc::new(
+        api::copy_host_vec_to_device(&Arc::new(vec![POS]))
+            .reshape(&[1])
+            .sync_on(&stream)?,
+    );
+
+    let mk_outs = || -> Result<_> {
+        Ok((
+            api::zeros::<f16>(&[total, D]).sync_on(&stream)?,
+            api::zeros::<f16>(&[NKV, MAX_SEQ, D]).sync_on(&stream)?,
+            api::zeros::<f16>(&[NKV, MAX_SEQ, D]).sync_on(&stream)?,
+        ))
+    };
+    let (q_safe, k_safe, v_safe) = mk_outs()?;
+
+    let generics = vec![D.to_string(), HALF_D.to_string(), MAX_SEQ.to_string()];
+    qk_norm_rope_kv_decode_f16(
+        &qkv,
+        &qw,
+        &kw,
+        &inv,
+        &q_safe,
+        &k_safe,
+        &v_safe,
+        &pos,
+        1e-6f32,
+        NQ as i32,
+        NKV as i32,
+    )
+    .generics(generics)
+    .grid((total as u32, 2u32, 1u32))
+    .sync_on(&stream)?;
+
+    // Host reference in f32. Device cos/sin and reduction order differ in
+    // rounding, so q/k compare with tolerance; v is a pure copy (exact) and
+    // untouched cache slots must stay exactly zero.
+    let qkv_h = gen_f16(1, qkv_len);
+    let qw_h = gen_f16(2, D);
+    let kw_h = gen_f16(3, D);
+    let q_got = q_safe.to_host_vec().sync_on(&stream)?;
+    let k_got = k_safe.to_host_vec().sync_on(&stream)?;
+    let v_got = v_safe.to_host_vec().sync_on(&stream)?;
+    let mut bad = 0usize;
+    let tol = |x: f32| 2e-2f32 * x.abs().max(0.05);
+    for h in 0..total {
+        let is_q = h < NQ;
+        let local = if is_q { h } else { h - NQ };
+        let base = if is_q { local * D } else { NQ * D + local * D };
+        let lo: Vec<f32> = (0..HALF_D).map(|i| qkv_h[base + i].to_f32()).collect();
+        let hi: Vec<f32> = (0..HALF_D).map(|i| qkv_h[base + HALF_D + i].to_f32()).collect();
+        let w = if is_q { &qw_h } else { &kw_h };
+        let mut ss = 0f64;
+        for i in 0..HALF_D {
+            ss += (lo[i] as f64) * (lo[i] as f64) + (hi[i] as f64) * (hi[i] as f64);
+        }
+        let inv = (1.0 / ((ss / D as f64) + 1e-6).sqrt()) as f32;
+        for i in 0..HALF_D {
+            let nl = lo[i] * inv * w[i].to_f32();
+            let nh = hi[i] * inv * w[HALF_D + i].to_f32();
+            let theta = POS as f32 * inv_host[i];
+            let (sn, cs) = theta.sin_cos();
+            let ylo = nl * cs - nh * sn;
+            let yhi = nh * cs + nl * sn;
+            let (g_lo, g_hi) = if is_q {
+                (
+                    q_got[local * D + i].to_f32(),
+                    q_got[local * D + HALF_D + i].to_f32(),
+                )
+            } else {
+                let o = local * MAX_SEQ * D + (POS as usize) * D;
+                (k_got[o + i].to_f32(), k_got[o + HALF_D + i].to_f32())
+            };
+            if (g_lo - ylo).abs() > tol(ylo) || (g_hi - yhi).abs() > tol(yhi) {
+                if bad < 5 {
+                    eprintln!("h={h} i={i}: got ({g_lo},{g_hi}) want ({ylo},{yhi})");
+                }
+                bad += 1;
+            }
+        }
+        if !is_q {
+            let vbase = (NQ + NKV) * D + local * D;
+            let o = local * MAX_SEQ * D + (POS as usize) * D;
+            for i in 0..D {
+                if v_got[o + i].to_f32() != qkv_h[vbase + i].to_f32() {
+                    bad += 1;
+                }
+                if k_got[local * MAX_SEQ * D + i].to_f32() != 0.0 {
+                    bad += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(bad, 0, "{bad} mismatches vs host reference");
+    Ok(())
+}
