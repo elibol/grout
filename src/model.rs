@@ -2792,20 +2792,18 @@ impl Qwen3Engine {
                         // fmha_lse_partial is allocated one-row-per-CTA
                         // ([kv_heads * splits, GROUP]), so the legacy per-CTA
                         // lse tile view lines up with the mapped 1-D grid.
-                        unsafe {
-                            fmha_decode_gqa_split_mapped(
-                                (&mut bufs.fmha_att_partial)
-                                    .partition([1, fmha_group_size, head_dim])
-                                    .map([1, 1, 1], split_ntb),
-                                &rope_q_grouped,
-                                &*k_cache,
-                                &*v_cache,
-                                (&mut bufs.fmha_lse_partial)
-                                    .partition([1, fmha_group_size]),
-                                qk_scale_f16,
-                                &position,
-                            )
-                        }
+                        fmha_decode_gqa_split_mapped(
+                            (&mut bufs.fmha_att_partial)
+                                .partition([1, fmha_group_size, head_dim])
+                                .map([1, 1, 1], split_ntb),
+                            &rope_q_grouped,
+                            &*k_cache,
+                            &*v_cache,
+                            (&mut bufs.fmha_lse_partial)
+                                .partition([1, fmha_group_size]),
+                            qk_scale_f16,
+                            &position,
+                        )
                         .generics(vec![
                             fmha_group_size.to_string(),
                             attn_bn.to_string(),
@@ -2974,15 +2972,13 @@ impl Qwen3Engine {
                 .map_err(|e| anyhow::anyhow!("prime final add_rms_norm failed: {e:?}"))?;
 
                 if use_fused_lm_head_argmax {
-                    unsafe {
-                        lm_head_argmax_blocks_f16(
-                            &*self.lm_head,
-                            &bufs.normed,
-                            (&mut bufs.argmax_block_max).partition([1]),
-                            (&mut bufs.argmax_block_idx).partition([1]),
-                            vocab_size as i32,
-                        )
-                    }
+                    lm_head_argmax_blocks_f16(
+                        &*self.lm_head,
+                        &bufs.normed,
+                        (&mut bufs.argmax_block_max).partition([1]),
+                        (&mut bufs.argmax_block_idx).partition([1]),
+                        vocab_size as i32,
+                    )
                     .generics(vec![d.to_string()])
                     .sync_on(stream)
                     .map_err(|e| anyhow::anyhow!("prime fused lm_head_argmax failed: {e:?}"))?;
@@ -3359,20 +3355,18 @@ impl Qwen3Engine {
                         // fmha_lse_partial is allocated one-row-per-CTA
                         // (see DecodeBuffers construction).
                         s.record(
-                            unsafe {
-                                fmha_decode_gqa_split_mapped(
-                                    (&mut bufs.fmha_att_partial)
-                                        .partition([1, fmha_group_size, head_dim])
-                                        .map([1, 1, 1], split_ntb),
-                                    &rope_q_grouped,
-                                    &*k_cache,
-                                    &*v_cache,
-                                    (&mut bufs.fmha_lse_partial)
-                                        .partition([1, fmha_group_size]),
-                                    qk_scale_f16,
-                                    &position,
-                                )
-                            }
+                            fmha_decode_gqa_split_mapped(
+                                (&mut bufs.fmha_att_partial)
+                                    .partition([1, fmha_group_size, head_dim])
+                                    .map([1, 1, 1], split_ntb),
+                                &rope_q_grouped,
+                                &*k_cache,
+                                &*v_cache,
+                                (&mut bufs.fmha_lse_partial)
+                                    .partition([1, fmha_group_size]),
+                                qk_scale_f16,
+                                &position,
+                            )
                             .generics(vec![
                                 fmha_group_size.to_string(),
                                 attn_bn.to_string(),
@@ -3541,15 +3535,13 @@ impl Qwen3Engine {
 
                 if use_fused_lm_head_argmax {
                     s.record(
-                        unsafe {
-                            lm_head_argmax_blocks_f16(
-                                &*self.lm_head,
-                                &bufs.normed,
-                                (&mut bufs.argmax_block_max).partition([1]),
-                                (&mut bufs.argmax_block_idx).partition([1]),
-                                vocab_size as i32,
-                            )
-                        }
+                        lm_head_argmax_blocks_f16(
+                            &*self.lm_head,
+                            &bufs.normed,
+                            (&mut bufs.argmax_block_max).partition([1]),
+                            (&mut bufs.argmax_block_idx).partition([1]),
+                            vocab_size as i32,
+                        )
                         .generics(vec![d.to_string()]),
                     )?;
                 } else {
