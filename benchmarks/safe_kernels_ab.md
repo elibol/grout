@@ -216,6 +216,61 @@ need the mapped-index/grid-axis brand bridge (owned-axis) since their
 store rows derive from the map or CTA id; the prefill raw fused kernels
 and LPT remain gated as before.
 
+## Derived-fact migration (2026-07-30, cutile-rs a902939)
+
+The `with_bounds`/`Dim`/`coord` annotation family is deprecated upstream;
+all 19 grout call sites migrated to the canonical derived-fact form
+(plain partitions, `0..num_tiles(&part, axis)` loops, plain-array
+indexing; cross-tensor ties become automatic launch checks). Per-kernel
+acceptance = JIT counters + normalized Tile IR diff against the
+`unchecked_accesses = true` unsafe twin (SSA ids normalized):
+
+| kernel | placement (disch/hoist/in-place) | deny | IR vs unsafe twin |
+|---|---|---|---|
+| rms_norm_mapped_f16 | 3/0/0 | yes | identical |
+| add_rms_norm_mapped_f16 | 7/0/0 | yes | identical |
+| splitk_reduce_merge_mapped | 5/0/0 | yes | identical |
+| add_rms_norm_decode_bounded_f16 | 13/0/0 | yes | identical |
+| add_rms_norm_rows_bounded_spec_f16 | 7/4/0 | no | hoisted-only (4 preamble asserts) |
+| fmha_decode_gqa_split_mapped | 8/2/0 | no | hoisted-only (kv-preheader hunk; inner loop untouched) |
+| lm_head_argmax_blocks_f16 | 3/1/0 | no | hoisted-only (1 preamble assert) |
+
+Notes:
+
+- `deny_in_kernel_checks` is strict — its contract is discharge-or-launch;
+  a preheader-hoisted check is still "in the kernel" and rejected. The
+  three no-deny rows are deliberate: their hoisted checks depend on the
+  launch grid or a device-read position, which cannot leave the kernel.
+- `partition_mut` and `PartitionMut::store([i32; N])` are safe at this
+  tip (`PartitionMut::load` is not), which removed the last `unsafe`
+  blocks from the decode norm kernel.
+- The grid-rowed spec kernel now JITs and launches clean — the
+  owned-axis acceptance criterion is met by the derived-fact design;
+  its test flipped from expected-failure to a regression test.
+
+Ports landed with the same acceptance: `fmha_decode_gqa_split_mapped`
+dropped its `unsafe fn` (the lse whole-view store is ordered by
+token-threading serialization) — the default decode path now has zero
+unsafe kernels; `add_rms_norm_decode_raw_f16` is deleted (the safe port
+is the only decode-norm implementation at all six call sites; unit test
+now checks a host-computed reference); `lm_head_argmax_blocks_f16`
+(opt-in) is safe, and a non-dividing vocab now traps loudly instead of
+reading past the weights.
+
+Release-bench check (Qwen3-4B, tg=128, 3 reps, decode-phase tok/s),
+same-day before -> after: pp=18 165.0 -> 173.0, pp=512 161.3 -> 170.6,
+pp=2048 157.8 -> 158.2 (reference band ~170 at pp=18). Engine output
+text identical throughout.
+
+**Census after this pass (engine-invoked): 23 safe / 3 unsafe**
+(+1 opt-in unsafe in flash_decode.rs). The three: the two raw fused
+qk_norm_rope_kv kernels (portable under derived facts — the dynpos KV
+append is a data-dependent store index whose in-place check runs once
+per store; the unfused safe siblings already exist) and
+fmha_prefill_gqa_lpt (stays by design: schedule-derived indices).
+prefill_splitk_reduce_merge and fmha_prefill_gqa_lpt_split are dead
+code; the load helpers and group_gemm_nt_desc are microbench-only.
+
 ## Tracked follow-ups
 
 - tileiras For-region register pressure (SASS/cubin artifacts saved on
