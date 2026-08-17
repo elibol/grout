@@ -2322,20 +2322,26 @@ pub mod kernels {
     /// partition ([1, GROUP, D] tiles on a (kv_heads, NUM_KV_SPLITS, 1)
     /// logical grid, one index per CTA) so its store is a proved disjoint
     /// mapped store; K/V loads are bounds-checked `load_pipelined::<LATENCY>`;
-    /// unchecked_accesses=false. The fn stays `unsafe` only because lse_out
-    /// has a different tile shape ([1, GROUP] rank-2) and cannot share
-    /// att_out's index stream — it stays a legacy per-CTA tile view until a
-    /// mixed-shape shared-map API exists. Host contract: att partitioned
-    /// [1, GROUP, D].map([1, 1, 1], kv_heads * NUM_KV_SPLITS); lse scratch
-    /// viewed as [kv_heads * NUM_KV_SPLITS, GROUP] (one row per CTA, same
-    /// row-major order as the att map) and partitioned [1, GROUP].
+    /// Fully safe: the lse store is a whole-view store through the per-CTA
+    /// [1, GROUP] binding, ordered by the token-threading serialization of
+    /// repeated persistent-loop stores; the K/V loads' checks hoist to the
+    /// kv-loop preheader (they depend on the device-read position, so they
+    /// run once per persistent index — never in the inner loop). Host
+    /// contract: att partitioned [1, GROUP, D].map([1, 1, 1],
+    /// kv_heads * NUM_KV_SPLITS); lse scratch viewed as
+    /// [kv_heads * NUM_KV_SPLITS, GROUP] (one row per CTA, same row-major
+    /// order as the att map) and partitioned [1, GROUP].
+    ///
+    /// No `deny_in_kernel_checks` here by design: the kv-loop bound is the
+    /// device-read position, so its two checks cannot leave the kernel —
+    /// they hoist to the kv-loop preheader (once per persistent index) and
+    /// deny would reject exactly that accepted placement.
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=false,
                        optimization_hints = (
                          sm_100 = (occupancy=1, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
-    unsafe fn fmha_decode_gqa_split_mapped<
+    fn fmha_decode_gqa_split_mapped<
         const GROUP: i32,
         const BN: i32,
         const D: i32,
