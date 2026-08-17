@@ -398,11 +398,10 @@ pub mod kernels {
     // Grid: ceil(vocab / 64). A second argmax_reduce_blocks_to_u32 launch
     // reduces the per-block maxima to token_ids[0].
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=true,
                        optimization_hints = (
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
-    unsafe fn lm_head_argmax_blocks_f16<const K: i32>(
+    fn lm_head_argmax_blocks_f16<const K: i32>(
         weights: &Tensor<f16, { [-1, K] }>,
         hidden: &Tensor<f16, { [1, K] }>,
         block_max: &mut Tensor<f32, { [1] }>,
@@ -419,8 +418,7 @@ pub mod kernels {
         let hidden_part: Partition<f16, { [1, 32] }> = hidden.partition(hidden_shape);
 
         let mut acc: Tile<f32, { [64] }> = constant(0.0f32, rows_shape);
-        let num_k_tiles: i32 = K / 32i32;
-        for k_block in 0i32..num_k_tiles {
+        for k_block in 0i32..num_tiles(&weight_part, 1) {
             let w_f16: Tile<f16, { [64, 32] }> = weight_part.load([block, k_block]);
             let h_f16: Tile<f16, { [1, 32] }> = hidden_part.load([0i32, k_block]);
             let w: Tile<f32, { [64, 32] }> = convert_tile(w_f16);
