@@ -72,7 +72,7 @@ fn add_rms_norm_decode_bounded_matches_raw() -> Result<()> {
             return Ok(());
         }
     }
-    use grout::kernels::{add_rms_norm_decode_bounded_f16, add_rms_norm_decode_raw_f16};
+    use grout::kernels::add_rms_norm_decode_bounded_f16;
 
     const N: usize = 2560;
     const BS: usize = 512;
@@ -106,22 +106,22 @@ fn add_rms_norm_decode_bounded_matches_raw() -> Result<()> {
     );
     let eps = 1e-6f32;
 
-    // Raw reference.
-    let out_raw = api::zeros::<f16>(&[1, N]).sync_on(&stream)?;
-    let res_raw = api::zeros::<f16>(&[1, N]).sync_on(&stream)?;
-    unsafe {
-        add_rms_norm_decode_raw_f16(
-            residual.device_pointer().clone(),
-            x.device_pointer().clone(),
-            w.device_pointer().clone(),
-            out_raw.device_pointer().clone(),
-            res_raw.device_pointer().clone(),
-            eps,
-        )
+    // Host reference (f32 mirror of the kernel math; GPU reduction order
+    // differs, so compare with a small tolerance).
+    let host_r = gen_vals(1);
+    let host_x = gen_vals(2);
+    let host_w = gen_vals(3);
+    let mut combined = vec![0f32; N];
+    let mut ssq = 0f64;
+    for i in 0..N {
+        let c = host_r[i].to_f32() + host_x[i].to_f32();
+        combined[i] = c;
+        ssq += (c as f64) * (c as f64);
     }
-    .generics(vec![N.to_string(), BS.to_string()])
-    .grid((1u32, 1u32, 1u32))
-    .sync_on(&stream)?;
+    let inv_rms = (1.0 / ((ssq / N as f64) + eps as f64).sqrt()) as f32;
+    let expect_out: Vec<f32> = (0..N)
+        .map(|i| combined[i] * inv_rms * host_w[i].to_f32())
+        .collect();
 
     // Bounded kernel.
     let out_b = api::zeros::<f16>(&[1, N]).sync_on(&stream)?;
@@ -140,20 +140,19 @@ fn add_rms_norm_decode_bounded_matches_raw() -> Result<()> {
     let out_b = result.3.unpartition();
     let res_b = result.4.unpartition();
 
-    let or = out_raw.to_host_vec().sync_on(&stream)?;
     let ob = out_b.to_host_vec().sync_on(&stream)?;
-    let rr = res_raw.to_host_vec().sync_on(&stream)?;
     let rb = res_b.to_host_vec().sync_on(&stream)?;
     let mut bad = 0;
     for i in 0..N {
-        if or[i].to_f32() != ob[i].to_f32() || rr[i].to_f32() != rb[i].to_f32() {
+        let got_out = ob[i].to_f32();
+        let got_res = rb[i].to_f32();
+        let ref_res = f16::from_f32(combined[i]).to_f32();
+        let tol = 1e-2f32 * expect_out[i].abs().max(0.05);
+        if (got_out - expect_out[i]).abs() > tol || got_res != ref_res {
             if bad < 5 {
                 eprintln!(
-                    "mismatch @{i}: out raw={} bounded={} | res raw={} bounded={}",
-                    or[i].to_f32(),
-                    ob[i].to_f32(),
-                    rr[i].to_f32(),
-                    rb[i].to_f32()
+                    "mismatch @{i}: out got={got_out} want~{} | res got={got_res} want={ref_res}",
+                    expect_out[i]
                 );
             }
             bad += 1;

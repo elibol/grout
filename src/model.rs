@@ -3,7 +3,6 @@ use crate::cublas;
 use crate::flash_decode::attention_decode_kernel_grouped;
 use crate::kernels::{
     KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_bounded_f16,
-    add_rms_norm_decode_raw_f16,
     add_rms_norm_mapped_f16, argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
     flash_attn_causal_seq_dynpos_mapped_f16, flash_attn_causal_seq_mapped_f16, fmha_causal_mapped,
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
@@ -86,10 +85,8 @@ const KV_CACHE_BM_S_DEFAULT: usize = 16;
 // Tunable via GROUT_EMBED_BLOCK.
 const EMBED_BLOCK: usize = 1024;
 const POINTWISE_BLOCK: usize = 1024;
-// Decode CUDA graphs use `add_rms_norm_decode_raw_f16`, a contiguous raw
-// pointer variant. The 2026-04-29 sm_120 retry found BS=4096 best for that
-// kernel (median 1376 ns vs 3232 ns for the old generic decode path).
-// Override with GROUT_RMS_BLOCK for further ablation.
+// Decode CUDA graphs use `add_rms_norm_decode_bounded_f16`, the safe
+// contiguous single-row fused add+RMSNorm kernel.
 const ADD_RMS_DECODE_BLOCK: usize = 4096;
 const ROPE_BLOCK: usize = 128;
 // ARGMAX_BLOCK: tiles vocab (= 151936). Never swept. Current default 128
@@ -2468,39 +2465,20 @@ impl Qwen3Engine {
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime rms_norm failed: {e:?}"))?;
                     } else {
-                        if env_bool_or("GROUT_BOUNDED_DECODE_NORM", false) {
-                            add_rms_norm_decode_bounded_f16(
-                                &bufs.hidden_after_attn,
-                                &bufs.ff_down,
-                                &w.input_layernorm,
-                                (&mut bufs.normed).partition([1usize, d]),
-                                (&mut bufs.hidden).partition([1usize, d]),
-                                eps,
-                            )
-                            .generics(vec![d.to_string(), rms_block.to_string()])
-                            .grid((1u32, 1u32, 1u32))
-                            .sync_on(stream)
-                            .map_err(|e| {
-                                anyhow::anyhow!("prime add_rms_norm input failed: {e:?}")
-                            })?;
-                        } else {
-                            unsafe {
-                                add_rms_norm_decode_raw_f16(
-                                    bufs.hidden_after_attn.device_pointer().clone(),
-                                    bufs.ff_down.device_pointer().clone(),
-                                    w.input_layernorm.device_pointer().clone(),
-                                    bufs.normed.device_pointer().clone(),
-                                    bufs.hidden.device_pointer().clone(),
-                                    eps,
-                                )
-                            }
-                            .generics(vec![d.to_string(), rms_block.to_string()])
-                            .grid((1u32, 1u32, 1u32))
-                            .sync_on(stream)
-                            .map_err(|e| {
-                                anyhow::anyhow!("prime add_rms_norm input failed: {e:?}")
-                            })?;
-                        }
+                        add_rms_norm_decode_bounded_f16(
+                            &bufs.hidden_after_attn,
+                            &bufs.ff_down,
+                            &w.input_layernorm,
+                            (&mut bufs.normed).partition([1usize, d]),
+                            (&mut bufs.hidden).partition([1usize, d]),
+                            eps,
+                        )
+                        .generics(vec![d.to_string(), rms_block.to_string()])
+                        .grid((1u32, 1u32, 1u32))
+                        .sync_on(stream)
+                        .map_err(|e| {
+                            anyhow::anyhow!("prime add_rms_norm input failed: {e:?}")
+                        })?;
                     }
 
                     // QKV GEMV (cuBLAS uses raw device pointers + explicit m/k)
@@ -2914,35 +2892,18 @@ impl Qwen3Engine {
                     .map_err(|e| anyhow::anyhow!("prime o_proj gemv failed: {e:?}"))?;
 
                     // Add + RMS norm
-                    if env_bool_or("GROUT_BOUNDED_DECODE_NORM", false) {
-                        add_rms_norm_decode_bounded_f16(
-                            &bufs.hidden,
-                            &bufs.attn_proj,
-                            &w.post_attention_layernorm,
-                            (&mut bufs.ff_normed).partition([1usize, d]),
-                            (&mut bufs.hidden_after_attn).partition([1usize, d]),
-                            eps,
-                        )
-                        .generics(vec![d.to_string(), rms_block.to_string()])
-                        .grid((1u32, 1u32, 1u32))
-                        .sync_on(stream)
-                        .map_err(|e| anyhow::anyhow!("prime add_rms_norm failed: {e:?}"))?;
-                    } else {
-                        unsafe {
-                            add_rms_norm_decode_raw_f16(
-                                bufs.hidden.device_pointer().clone(),
-                                bufs.attn_proj.device_pointer().clone(),
-                                w.post_attention_layernorm.device_pointer().clone(),
-                                bufs.ff_normed.device_pointer().clone(),
-                                bufs.hidden_after_attn.device_pointer().clone(),
-                                eps,
-                            )
-                        }
-                        .generics(vec![d.to_string(), rms_block.to_string()])
-                        .grid((1u32, 1u32, 1u32))
-                        .sync_on(stream)
-                        .map_err(|e| anyhow::anyhow!("prime add_rms_norm failed: {e:?}"))?;
-                    }
+                    add_rms_norm_decode_bounded_f16(
+                        &bufs.hidden,
+                        &bufs.attn_proj,
+                        &w.post_attention_layernorm,
+                        (&mut bufs.ff_normed).partition([1usize, d]),
+                        (&mut bufs.hidden_after_attn).partition([1usize, d]),
+                        eps,
+                    )
+                    .generics(vec![d.to_string(), rms_block.to_string()])
+                    .grid((1u32, 1u32, 1u32))
+                    .sync_on(stream)
+                    .map_err(|e| anyhow::anyhow!("prime add_rms_norm failed: {e:?}"))?;
 
                     // Gate+Up GEMV
                     cublas::GemvInPlace {
@@ -2999,16 +2960,14 @@ impl Qwen3Engine {
                 }
 
                 // Final fused add + RMS norm: fold last layer's residual add into final norm
-                unsafe {
-                    add_rms_norm_decode_raw_f16(
-                        bufs.hidden_after_attn.device_pointer().clone(),
-                        bufs.ff_down.device_pointer().clone(),
-                        self.norm.device_pointer().clone(),
-                        bufs.normed.device_pointer().clone(),
-                        bufs.hidden.device_pointer().clone(),
-                        eps,
-                    )
-                }
+                add_rms_norm_decode_bounded_f16(
+                    &bufs.hidden_after_attn,
+                    &bufs.ff_down,
+                    &self.norm,
+                    (&mut bufs.normed).partition([1usize, d]),
+                    (&mut bufs.hidden).partition([1usize, d]),
+                    eps,
+                )
                 .generics(vec![d.to_string(), rms_block.to_string()])
                 .grid((1u32, 1u32, 1u32))
                 .sync_on(stream)
@@ -3107,16 +3066,14 @@ impl Qwen3Engine {
                         )?;
                     } else {
                         s.record(
-                            unsafe {
-                                add_rms_norm_decode_raw_f16(
-                                    bufs.hidden_after_attn.device_pointer().clone(),
-                                    bufs.ff_down.device_pointer().clone(),
-                                    w.input_layernorm.device_pointer().clone(),
-                                    bufs.normed.device_pointer().clone(),
-                                    bufs.hidden.device_pointer().clone(),
-                                    eps,
-                                )
-                            }
+                            add_rms_norm_decode_bounded_f16(
+                                &bufs.hidden_after_attn,
+                                &bufs.ff_down,
+                                &w.input_layernorm,
+                                (&mut bufs.normed).partition([1usize, d]),
+                                (&mut bufs.hidden).partition([1usize, d]),
+                                eps,
+                            )
                             .generics(vec![d.to_string(), rms_block.to_string()])
                             .grid((1u32, 1u32, 1u32)),
                         )?;
@@ -3506,16 +3463,14 @@ impl Qwen3Engine {
 
                     // Fused add + RMS norm: (hidden + attn_proj) → (hidden_after_attn, ff_normed)
                     s.record(
-                        unsafe {
-                            add_rms_norm_decode_raw_f16(
-                                bufs.hidden.device_pointer().clone(),
-                                bufs.attn_proj.device_pointer().clone(),
-                                w.post_attention_layernorm.device_pointer().clone(),
-                                bufs.ff_normed.device_pointer().clone(),
-                                bufs.hidden_after_attn.device_pointer().clone(),
-                                eps,
-                            )
-                        }
+                        add_rms_norm_decode_bounded_f16(
+                            &bufs.hidden,
+                            &bufs.attn_proj,
+                            &w.post_attention_layernorm,
+                            (&mut bufs.ff_normed).partition([1usize, d]),
+                            (&mut bufs.hidden_after_attn).partition([1usize, d]),
+                            eps,
+                        )
                         .generics(vec![d.to_string(), rms_block.to_string()])
                         .grid((1u32, 1u32, 1u32)),
                     )?;
@@ -3572,16 +3527,14 @@ impl Qwen3Engine {
 
                 // Final fused add + RMS norm: fold last layer's residual add into final norm
                 s.record(
-                    unsafe {
-                        add_rms_norm_decode_raw_f16(
-                            bufs.hidden_after_attn.device_pointer().clone(),
-                            bufs.ff_down.device_pointer().clone(),
-                            self.norm.device_pointer().clone(),
-                            bufs.normed.device_pointer().clone(),
-                            bufs.hidden.device_pointer().clone(),
-                            eps,
-                        )
-                    }
+                    add_rms_norm_decode_bounded_f16(
+                        &bufs.hidden_after_attn,
+                        &bufs.ff_down,
+                        &self.norm,
+                        (&mut bufs.normed).partition([1usize, d]),
+                        (&mut bufs.hidden).partition([1usize, d]),
+                        eps,
+                    )
                     .generics(vec![d.to_string(), rms_block.to_string()])
                     .grid((1u32, 1u32, 1u32)),
                 )?;
