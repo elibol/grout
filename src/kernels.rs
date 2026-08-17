@@ -299,7 +299,7 @@ pub mod kernels {
     /// disjoint stores; no unsafe. Host contract: partition tile [1, BLOCK_SIZE],
     /// map [1, 1], num_tile_blocks = rows, BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=false,
+                       deny_in_kernel_checks = true,
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -311,19 +311,15 @@ pub mod kernels {
         eps: f32,
     ) {
         let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
-        // Dim + with_bounds (persistent-gemm style): tie x's index space to
-        // out's grid dims and load through proof-carrying coords minted from
-        // out's map. The column dim is redundant (the grid has exactly one
-        // column tile since BLOCK_SIZE >= N) but binding it keeps the coord
-        // fully branded.
-        let rows = num_tiles(&out, 0);
-        let cols = num_tiles(&out, 1);
-        let x_part = x.partition(tile_shape).with_bounds((rows, cols));
+        // Derived facts (persistent-gemm style): `out`'s mapped components
+        // carry axis provenance, so indexing `x` with them turns the
+        // cross-tensor tie into a launch check — no annotation needed.
+        let x_part = x.partition(tile_shape);
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
         
         for index in out.iter_indices() {
             let (row, j) = index.components();
-            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load(coord((row, j)));
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
 
             let sq: Tile<f32, { [1, BLOCK_SIZE] }> = tx * tx;
@@ -2493,7 +2489,7 @@ pub mod kernels {
     /// [1, GROUP, CHUNK_D].map([1, 1, 1], kv_heads * (D / CHUNK_D)), and the
     /// scratch tensors cover out's kv_head/D extents.
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=false,
+                       deny_in_kernel_checks = true,
                        optimization_hints = (
                          sm_100 = (occupancy=4, max_divisibility=16,),
                          sm_120 = (occupancy=4, max_divisibility=16,),
@@ -2511,12 +2507,10 @@ pub mod kernels {
         att_partial: &Tensor<f16, { [-1, NS_GROUP, D] }>,
         lse_partial: &Tensor<f32, { [-1, NS_GROUP] }>,
     ) {
-        let lse_part: BoundedPartition<f32, { [1, NS_GROUP] }> = lse_partial
-            .partition(const_shape![1, NS_GROUP])
-            .with_bounds((num_tiles(&out, 0), Dim::new(1)));
-        let att_part: BoundedPartition<f16, { [1, NS_GROUP, CHUNK_D] }> = att_partial
-            .partition(const_shape![1, NS_GROUP, CHUNK_D])
-            .with_bounds((num_tiles(&out, 0), Dim::new(1), num_tiles(&out, 2)));
+        let lse_part: Partition<f32, { [1, NS_GROUP] }> =
+            lse_partial.partition(const_shape![1, NS_GROUP]);
+        let att_part: Partition<f16, { [1, NS_GROUP, CHUNK_D] }> =
+            att_partial.partition(const_shape![1, NS_GROUP, CHUNK_D]);
         let transpose_2d: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
             dims: &[1i32, 0i32],
         };
@@ -2530,7 +2524,7 @@ pub mod kernels {
             // This CTA's [1, NS_GROUP] LSE tile → [GROUP, NUM_KV_SPLITS]
             // (split-major layout; see splitk_reduce_merge).
             let lse_tile: Tile<f32, { [1, NS_GROUP] }> =
-                lse_part.load_pipelined::<LATENCY>(coord((kv_head_id, 0i32)));
+                lse_part.load_pipelined::<LATENCY>([kv_head_id, 0i32]);
             let lse_ns_g: Tile<f32, { [NUM_KV_SPLITS, GROUP] }> =
                 lse_tile.reshape(const_shape![NUM_KV_SPLITS, GROUP]);
             let lse_tile: Tile<f32, { [GROUP, NUM_KV_SPLITS] }> = permute(lse_ns_g, transpose_2d);
@@ -2554,7 +2548,7 @@ pub mod kernels {
 
             // This CTA's CHUNK_D slice → [GROUP, NUM_KV_SPLITS, CHUNK_D].
             let att_tile: Tile<f16, { [1, NS_GROUP, CHUNK_D] }> =
-                att_part.load_pipelined::<LATENCY>(coord((kv_head_id, 0i32, d_chunk_id)));
+                att_part.load_pipelined::<LATENCY>([kv_head_id, 0i32, d_chunk_id]);
             let att_ns_g_d: Tile<f16, { [NUM_KV_SPLITS, GROUP, CHUNK_D] }> =
                 att_tile.reshape(const_shape![NUM_KV_SPLITS, GROUP, CHUNK_D]);
             let att_g_ns_d: Tile<f16, { [GROUP, NUM_KV_SPLITS, CHUNK_D] }> =
@@ -2582,7 +2576,7 @@ pub mod kernels {
     /// both outputs partitioned [1, BLOCK_SIZE].map([1, 1], rows) with
     /// identical shapes; BLOCK_SIZE = N.next_power_of_two().
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=false,
+                       deny_in_kernel_checks = true,
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -2596,19 +2590,17 @@ pub mod kernels {
         eps: f32,
     ) {
         let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
-        // Dim + with_bounds (persistent-gemm style), as in rms_norm_mapped:
-        // both inputs' index spaces are tied to out's grid dims; loads take
-        // proof-carrying coords minted from the shared index stream.
-        let rows = num_tiles(&out, 0);
-        let cols = num_tiles(&out, 1);
-        let residual_part = residual.partition(tile_shape).with_bounds((rows, cols));
-        let x_part = x.partition(tile_shape).with_bounds((rows, cols));
+        // Derived facts, as in rms_norm_mapped: the shared index stream's
+        // components carry `out`'s axis provenance; the cross-tensor ties to
+        // `residual` and `x` become launch checks automatically.
+        let residual_part = residual.partition(tile_shape);
+        let x_part = x.partition(tile_shape);
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
 
         for index in out.iter_indices_with(&residual_out) {
             let (row, j) = index.components();
-            let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load(coord((row, j)));
-            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load(coord((row, j)));
+            let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> = residual_part.load([row, j]);
+            let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> = x_part.load([row, j]);
             let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = w_part.load([0i32]).reshape(tile_shape);
             let tr: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tr_f16);
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
@@ -2776,15 +2768,13 @@ pub mod kernels {
     }
 
 
-    /// Safe bounded-store port of `add_rms_norm_decode_raw_f16` (decode step:
-    /// fused residual add + RMSNorm over a single contiguous [1, N] row).
-    /// The row coordinate is the literal 0 and columns iterate a `Dim`, so
-    /// every load/store coordinate is proof-carrying; the bounds checks hoist
-    /// to the generated launcher (the safe bounded store's zero-register
-    /// contract). The rank-1 weight loads stay plain checked loads (affine
-    /// induction index; hoisted).
+    /// Safe port of `add_rms_norm_decode_raw_f16` (decode step: fused
+    /// residual add + RMSNorm over a single contiguous [1, N] row). The row
+    /// coordinate is the literal 0 and columns iterate `num_tiles` ranges,
+    /// so every check is discharged or leaves the kernel (derived facts /
+    /// launch checks); `deny_in_kernel_checks` makes that a build contract.
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=false,
+                       deny_in_kernel_checks = true,
                        optimization_hints = (
                          sm_100 = (max_divisibility=8,),
                          sm_120 = (max_divisibility=8,),
@@ -2798,18 +2788,15 @@ pub mod kernels {
         eps: f32,
     ) {
         let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
-        let rows = Dim::new(1);
-        let cols = Dim::new((N + BLOCK_SIZE - 1) / BLOCK_SIZE);
-
-        let residual_part = residual.partition(tile_shape).with_bounds((rows, cols));
-        let x_part = x.partition(tile_shape).with_bounds((rows, cols));
+        let residual_part = residual.partition(tile_shape);
+        let x_part = x.partition(tile_shape);
 
         let mut rms: Tile<f32, { [1, BLOCK_SIZE] }> = constant(0.0, tile_shape);
-        for j in cols {
+        for j in 0i32..num_tiles(&residual_part, 1) {
             let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> =
-                residual_part.load_pipelined::<1>(coord((0i32, j)));
+                residual_part.load_pipelined::<1>([0i32, j]);
             let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> =
-                x_part.load_pipelined::<1>(coord((0i32, j)));
+                x_part.load_pipelined::<1>([0i32, j]);
             let tr: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tr_f16);
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tx_f16);
             let combined: Tile<f32, { [1, BLOCK_SIZE] }> = tr + tx;
@@ -2824,19 +2811,13 @@ pub mod kernels {
         let inv_rms: Tile<f32, { [1, BLOCK_SIZE] }> = inv_rms.broadcast(tile_shape);
 
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
-        // SAFETY: mutable-view construction only — the two views cover
-        // disjoint tensors and every store goes through the bounded checked
-        // path. Making this constructor safe is the cutile-rs owned-axis
-        // follow-up; accesses are already proof-carrying.
-        let mut out_part =
-            unsafe { out.partition_mut(tile_shape) }.with_bounds((rows, cols));
-        let mut res_out_part =
-            unsafe { residual_out.partition_mut(tile_shape) }.with_bounds((rows, cols));
-        for j in cols {
+        let mut out_part = out.partition_mut(tile_shape);
+        let mut res_out_part = residual_out.partition_mut(tile_shape);
+        for j in 0i32..num_tiles(&residual_part, 1) {
             let tr_f16: Tile<f16, { [1, BLOCK_SIZE] }> =
-                residual_part.load_pipelined::<1>(coord((0i32, j)));
+                residual_part.load_pipelined::<1>([0i32, j]);
             let tx_f16: Tile<f16, { [1, BLOCK_SIZE] }> =
-                x_part.load_pipelined::<1>(coord((0i32, j)));
+                x_part.load_pipelined::<1>([0i32, j]);
             let tw_1d: Tile<f16, { [BLOCK_SIZE] }> = w_part.load([j]);
             let tw_f16: Tile<f16, { [1, BLOCK_SIZE] }> = tw_1d.reshape(tile_shape);
             let tr: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tr_f16);
@@ -2846,43 +2827,39 @@ pub mod kernels {
             let normed: Tile<f32, { [1, BLOCK_SIZE] }> = combined * inv_rms * tw;
             let normed_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(normed);
             let combined_f16: Tile<f16, { [1, BLOCK_SIZE] }> = convert_tile(combined);
-            out_part.store(normed_f16, coord((0i32, j)));
-            res_out_part.store(combined_f16, coord((0i32, j)));
+            out_part.store(normed_f16, [0i32, j]);
+            res_out_part.store(combined_f16, [0i32, j]);
         }
     }
 
 
-    /// ACCEPTANCE SPEC (expected NOT to JIT yet): the fully safe row-wise
-    /// RMSNorm-family kernel. One CTA per row via the launch grid, so the row
-    /// coordinate comes from `get_tile_block_id()` — an unbranded i32. The
-    /// bounded load/store path requires branded coords, and today only `Dim`
-    /// iteration mints them. When cutile-rs lands owned-axis row branding
-    /// (brand the grid axis itself), this kernel must compile and JIT clean;
-    /// until then its JIT failure is the acceptance criterion. See
-    /// tests/kernels.rs::rowwise_bounded_spec_jit_error (ignored).
-    #[cutile::entry(print_ir=false, unchecked_accesses=false)]
+    /// Grid-rowed fully safe form (was the owned-axis acceptance spec; the
+    /// derived-fact design closed it): one CTA per row via the launch grid,
+    /// row coordinate from `get_tile_block_id()` — a value computed before
+    /// the loop, so its checks hoist or leave the kernel; columns iterate
+    /// `num_tiles` ranges. Regression-tested by
+    /// tests/kernels.rs::rowwise_bounded_spec_jit_error.
+    #[cutile::entry(print_ir=false)]
     fn add_rms_norm_rows_bounded_spec_f16<const N: i32, const BLOCK_SIZE: i32>(
         residual: &Tensor<f16, { [-1, N] }>,
         x: &Tensor<f16, { [-1, N] }>,
         w: &Tensor<f16, { [N] }>,
-        out: &mut Tensor<f16, { [-1, N] }>,
+        out: &mut Tensor<f16, { [1, N] }>,
         eps: f32,
     ) {
         let tile_shape: Shape<{ [1, BLOCK_SIZE] }> = const_shape![1, BLOCK_SIZE];
         let pid: (i32, i32, i32) = get_tile_block_id();
         let row: i32 = pid.0;
-        let rows = Dim::new(residual.shape()[0]);
-        let cols = Dim::new((N + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
-        let residual_part = residual.partition(tile_shape).with_bounds((rows, cols));
-        let x_part = x.partition(tile_shape).with_bounds((rows, cols));
+        let residual_part = residual.partition(tile_shape);
+        let x_part = x.partition(tile_shape);
 
         let mut rms: Tile<f32, { [1, BLOCK_SIZE] }> = constant(0.0, tile_shape);
-        for j in cols {
+        for j in 0i32..num_tiles(&residual_part, 1) {
             let tr: Tile<f32, { [1, BLOCK_SIZE] }> =
-                convert_tile(residual_part.load_pipelined::<1>(coord((row, j))));
+                convert_tile(residual_part.load_pipelined::<1>([row, j]));
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> =
-                convert_tile(x_part.load_pipelined::<1>(coord((row, j))));
+                convert_tile(x_part.load_pipelined::<1>([row, j]));
             let combined: Tile<f32, { [1, BLOCK_SIZE] }> = tr + tx;
             rms = rms + combined * combined;
         }
@@ -2895,20 +2872,18 @@ pub mod kernels {
         let inv_rms: Tile<f32, { [1, BLOCK_SIZE] }> = inv_rms.broadcast(tile_shape);
 
         let w_part: Partition<f16, { [BLOCK_SIZE] }> = w.partition(const_shape![BLOCK_SIZE]);
-        // SAFETY: view construction only; all accesses go through the bounded
-        // checked path (same obligation as add_rms_norm_decode_bounded_f16).
-        let mut out_part = unsafe { out.partition_mut(tile_shape) }.with_bounds((rows, cols));
-        for j in cols {
+        let mut out_part = out.partition_mut(tile_shape);
+        for j in 0i32..num_tiles(&residual_part, 1) {
             let tr: Tile<f32, { [1, BLOCK_SIZE] }> =
-                convert_tile(residual_part.load_pipelined::<1>(coord((row, j))));
+                convert_tile(residual_part.load_pipelined::<1>([row, j]));
             let tx: Tile<f32, { [1, BLOCK_SIZE] }> =
-                convert_tile(x_part.load_pipelined::<1>(coord((row, j))));
+                convert_tile(x_part.load_pipelined::<1>([row, j]));
             let tw_1d: Tile<f16, { [BLOCK_SIZE] }> = w_part.load([j]);
             let tw: Tile<f32, { [1, BLOCK_SIZE] }> = convert_tile(tw_1d.reshape(tile_shape));
             let combined: Tile<f32, { [1, BLOCK_SIZE] }> = tr + tx;
             let normed_f16: Tile<f16, { [1, BLOCK_SIZE] }> =
                 convert_tile(combined * inv_rms * tw);
-            out_part.store(normed_f16, coord((row, j)));
+            out_part.store(normed_f16, [0i32, j]);
         }
     }
 

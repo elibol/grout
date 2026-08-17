@@ -163,12 +163,11 @@ fn add_rms_norm_decode_bounded_matches_raw() -> Result<()> {
     Ok(())
 }
 
-/// Acceptance spec for cutile-rs owned-axis row branding: the fully safe
-/// row-wise bounded kernel must JIT clean once grid-axis branding lands.
-/// Today it must FAIL to JIT (unbranded `get_tile_block_id` row coordinate).
-/// Run with `cargo test -- --ignored` to see the current error.
+/// Regression test for the derived-fact placement of the grid-rowed form:
+/// the fully safe row-wise kernel (row from `get_tile_block_id`, columns
+/// from `num_tiles` ranges) must JIT and launch cleanly. This was the
+/// owned-axis acceptance spec; the derived-fact design closed it.
 #[test]
-#[ignore = "acceptance spec: expected to fail JIT until cutile-rs row branding lands"]
 fn rowwise_bounded_spec_jit_error() -> Result<()> {
     match Device::device_count() {
         Ok(count) if count > 0 => {}
@@ -194,9 +193,6 @@ fn rowwise_bounded_spec_jit_error() -> Result<()> {
     .generics(vec![N.to_string(), BS.to_string()])
     .grid((4u32, 1u32, 1u32))
     .sync_on(&stream);
-    match r {
-        Ok(_) => println!("SPEC NOW PASSES: owned-axis row branding has landed"),
-        Err(e) => println!("SPEC JIT ERROR (expected today): {e:?}"),
-    }
-    Ok(())
+    r.map(|_| ())
+        .map_err(|e| anyhow::anyhow!("grid-rowed safe kernel must JIT+launch clean: {e:?}"))
 }
