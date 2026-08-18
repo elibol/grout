@@ -262,14 +262,17 @@ same-day before -> after: pp=18 165.0 -> 173.0, pp=512 161.3 -> 170.6,
 pp=2048 157.8 -> 158.2 (reference band ~170 at pp=18). Engine output
 text identical throughout.
 
-**Census after this pass (engine-invoked): 23 safe / 3 unsafe**
-(+1 opt-in unsafe in flash_decode.rs). The three: the two raw fused
-qk_norm_rope_kv kernels (portable under derived facts — the dynpos KV
-append is a data-dependent store index whose in-place check runs once
-per store; the unfused safe siblings already exist) and
-fmha_prefill_gqa_lpt (stays by design: schedule-derived indices).
-prefill_splitk_reduce_merge and fmha_prefill_gqa_lpt_split are dead
-code; the load helpers and group_gemm_nt_desc are microbench-only.
+**Census (updated 2026-07-30, second pass): 25 safe / 1 unsafe**
+(+1 opt-in unsafe in flash_decode.rs). Both raw fused qk_norm_rope_kv
+kernels are ported and deleted (qk_norm_rope_kv_decode_f16 counters
+8/0/11, decode 176 tok/s vs 173 raw; qk_norm_rope_kv_prefill_f16
+counters 17/0/24, pp=512 e2e 843.1 vs 836.2 raw — both straight-line
+kernels, checks once per CTA, host-reference unit tests, engine text
+identical). The one remaining engine-invoked unsafe kernel is
+fmha_prefill_gqa_lpt (schedule-derived indices; checked-LPT experiment
+pending). prefill_splitk_reduce_merge and fmha_prefill_gqa_lpt_split
+are dead code; the load helpers and group_gemm_nt_desc are
+microbench-only.
 
 ## Tracked follow-ups
 
