@@ -237,3 +237,63 @@ change the wrapper. No source or wrapper update was made.
 
 Full retuning, canonical sweep refresh, and baseline reruns remain out of scope
 for this evaluation.
+
+## Continuation Phase A: prefill regression attribution
+
+The production `qk_norm_rope_kv_prefill_f16` was compared with an exact-body
+diagnostic twin built as an unsafe `unchecked_accesses=true` entry. The twin
+was selected only at the single prefill call site and was removed after the
+experiment. Three paired rounds used checked/unchecked, unchecked/checked,
+checked/unchecked order; each process ran one warmup and three timed prefills.
+
+| pp | checked round means (ms) | unchecked round means (ms) | overall checked / unchecked (ms) | checked delta |
+|---:|---:|---:|---:|---:|
+| 2048 | 230.010 / 229.992 / 229.982 | 207.855 / 207.775 / 207.684 | 229.995 / 207.771 | +10.70% |
+| 8192 | 991.446 / 991.283 / 991.119 | 907.575 / 909.987 / 906.153 | 991.283 / 907.905 | +9.18% |
+
+| prefill kernel | REG | STACK (bytes) | LDL/STL |
+|---|---:|---:|---:|
+| checked production entry | 255 | 416 | 58 |
+| unchecked exact-body twin | 255 | 32 | 10 |
+
+The body and launch geometry were held fixed, while removing checked-access
+lowering reduced the stack by 384 bytes, removed 48 local-memory instructions,
+and improved whole-prefill latency by 9-11%. This assigns the regression to
+the checked-access form rather than the fused math alone. The twin still uses
+255 registers, so the result does not imply that the underlying port structure
+is resource-clean.
+
+### Mitigation ladder
+
+Each ladder cell used the pp=2048 prompt, one warmup, and three timed reps. The
+acceptance gate was `STACK < 100` and latency within 3% of the unchecked twin.
+
+| checked candidate | prefill mean (ms) | resource result | gate |
+|---|---:|---:|---|
+| occupancy hint 1 -> 2 | 178.010 | REG 128, STACK 416, 58 LDL/STL | fail: stack |
+| occupancy 2 + unconditional Q/K weight loads and tile select | 178.104 | REG 128, STACK 416, 58 LDL/STL | fail: stack |
+| compile-time Q/KV grid specializations | 172.638 | Q: STACK 160; KV: STACK 288 | fail: stack |
+| separate Q-grid and KV-grid entries with reduced signatures | 173.397 | Q: REG 128, STACK 160, 26 LDL/STL; KV: REG 128, STACK 288, 42 LDL/STL | fail: stack |
+
+All ladder candidates were faster than the occupancy-1 unchecked twin, but
+none met the explicit stack threshold. No mitigation was retained; production
+source was restored before the remaining audits.
+
+### Decode and mapped-prefill classification
+
+The structurally similar `qk_norm_rope_kv_decode_f16` is also resource-heavy
+on sm_100: `REG 255`, `STACK 208`, and 32 `LDL/STL`. This is a second live
+reproducer for the fused checked-access code-generation issue.
+
+At pp=8192, the mapped prefill attention kernel was then compiled at the July
+tile (`BM=128`, `BN=128`, LPT disabled). Its measured specialization is
+`REG 128`, `STACK 72`, and 11 `LDL/STL`; synchronized op profiling measured
+Attention at 1202.90 us per layer (64 calls). Whole-prefill time under that
+sync-after-every-op instrumentation averaged 977.159 ms and is not an e2e
+benchmark number.
+
+This classifies the earlier mapped `BM=16/BN=32` `STACK 1248` result as
+shape-specific mistuning, not an all-shape sm_100 code-generation failure.
+The fused checked prefill and decode kernels remain the cutile-rs/codegen
+handoff findings. Their diagnostic cubins and the mapped `BM=128/BN=128`
+cubin are retained in the ignored raw-result bundle.
