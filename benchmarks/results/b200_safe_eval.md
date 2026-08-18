@@ -422,3 +422,104 @@ No engine GEMM path was modified. Any future per-site persistent-GEMM dispatch
 must use `GROUT_CUTILE_GEMM` through `env_bool_or`, with default `false`
 retaining cuBLAS. The in-tree persistent kernel and microbenchmark are the only
 Phase B source changes.
+
+## Wide-tile fused-prefill family validation
+
+Date: 2026-08-18
+
+### Revisions and correctness
+
+- New grout: `21f21355b626ae2644b33483f828c966fdfd8da9`
+- Historical grout: `b924b882aee66b8a70a544a7e4824d8b565ea8a1`
+- cutile-rs: `61012a71ca6837f0af02d7516578a99258724a11`
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B
+
+Both `cargo build --release` and the separately rebuilt
+`cargo build --release --features benchmarks --bin grout_bench` passed. The
+six GPU kernel tests passed after rebuilding the complete cutile-rs dependency
+graph. A 2048-token raw prompt followed by 24 generated tokens was byte-identical
+to the prior ancestor run. Both generated outputs have SHA-256
+`407673405ccd7be79b119811ced911cba08b12f1ea59758a3bc676fd8d68cf74`.
+
+### Paired commit A/B
+
+Each commit used its own freshly built benchmark binary. Three rounds used
+old/new, new/old, old/new order at each prompt length. Every process ran one
+discarded warmup and three measured prefills. GPU clocks were left at their
+defaults, generated tokens were zero, and no op profiling was enabled.
+
+| pp | `b924b88` round means (ms) | `21f2135` round means (ms) | overall old / new (ms) | new delta |
+|---:|---:|---:|---:|---:|
+| 2048 | 176.566 / 177.702 / 178.121 | 137.531 / 139.382 / 140.930 | 177.463 / 139.281 | **-21.52%** |
+| 8192 | 781.367 / 782.966 / 784.648 | 629.526 / 630.565 / 630.516 | 782.994 / 630.202 | **-19.51%** |
+
+Against the July pp=2048 context of 121.91 ms, the old kernel-family tree was
+1.456x slower and the new tree is 1.142x slower. The wide-tile rebuild removes
+68.7% of the old tree's excess latency over that reference; 17.37 ms, or 14.25%,
+remains. The July value is context rather than a paired comparison because it
+came from an older tree and session.
+
+### Resource audit
+
+The wide kernels were compiled at the shipping `BM=32`; the per-row kernels do
+not have a BM specialization. `LDL/STL` is the number of matching local-memory
+instructions in `nvdisasm -c` output.
+
+| kernel | REG | STACK (bytes) | SHARED (bytes) | LDL/STL |
+|---|---:|---:|---:|---:|
+| old `qk_norm_rope_kv_prefill_f16` baseline | 255 | 416 | not retained here | 58 |
+| `q_norm_rope_prefill_wide_f16`, `BM=32` | 128 | 160 | 19764 | 176 |
+| `k_norm_rope_v_prefill_wide_f16`, `BM=32` | 128 | 288 | 27972 | 192 |
+| `q_norm_rope_prefill_f16` tail | 128 | 272 | 31156 | 90 |
+| `k_norm_rope_v_prefill_f16` tail | 128 | 320 | 29124 | 86 |
+
+All four entries reduce both register count and stack allocation versus the old
+fused kernel, but none is spill-free on sm_100. The wide entries execute one CTA
+over 32 rows, so their static local-instruction counts are not directly
+comparable to the old one-row kernel's count. The tail entries run only for
+remainder rows or unaligned cache starts.
+
+Resource capture through a `CUTILE_TILEIRAS_PATH` wrapper required explicitly
+setting `CUTILE_BYTECODE_VERSION=13.3`. Without that override, the wrapper-path
+version probe selected a bytecode form that the installed 13.3 `tileiras`
+accepted for its empty probe but rejected for a `cuda_tile.for` region. Normal
+production discovery through `CUDA_TOOLKIT_PATH` selected 13.3 correctly; fresh
+production builds and all tests passed. This is a capture-tooling issue to hand
+off to cutile-rs, not a production-kernel compile failure.
+
+### Synchronized op profile
+
+At pp=2048 with `GROUT_PROFILE_OPS=1` and
+`GROUT_PROFILE_SYNC_OPS=1`, the split family retained the graph-level
+`QkNormRopeKvPrefill` label:
+
+| op | calls | total (ms) | average (us/layer) |
+|---|---:|---:|---:|
+| `QkNormRopeKvPrefill` | 64 | 8.952 | **139.88** |
+| `Attention` | 64 | 11.841 | 185.02 |
+
+The 5090/Qwen3-4B reference is 49.4 us/layer. It is not shape-equivalent:
+Qwen3-32B has 64 Q heads while Qwen3-4B has 32; both use eight KV heads and
+head dimension 128.
+
+### BM sweep
+
+Each cell used one warmup and three measured prefills. The sweep was not paired,
+so sub-percent differences are treated as noise.
+
+| pp | BM=16 (ms) | BM=32 (ms) | BM=64 (ms) | observed best |
+|---:|---:|---:|---:|---:|
+| 2048 | 139.406 | **138.376** | 139.631 | 32 |
+| 8192 | 627.490 | 632.287 | **624.505** | 64 |
+
+BM32 remains the best pp=2048 cell. BM64 is 1.23% faster than BM32 at pp=8192
+in this single sweep, while losing 0.91% at pp=2048. The cross-length evidence
+does not justify changing the default from BM32 without a paired confirmation.
+
+### Verdict
+
+The wide-tile family is correct on sm_100 and recovers most of the B200
+prefill regression: 21.5% at pp=2048 and 19.5% at pp=8192 versus `b924b88`.
+The old `REG 255 / STACK 416` kernel is gone from the live prefill path, though
+all four replacements still spill and remain sm_100 code-generation follow-up
+material. No source or tuning default was changed by this validation.
