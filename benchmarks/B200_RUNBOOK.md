@@ -136,6 +136,20 @@ Comparable decode metric across engines: `gen_tokens / (e2e_ms - prefill_ms)`
 - One warmup rep is enough for steady-state (`--warmup-reps`, default 1
   in grout; sweeps use 3), but the *first-ever* run pays JIT cost —
   never let it into a measured cell.
+- **`grout_bench` is feature-gated** (`required-features =
+  ["benchmarks"]`): plain `cargo build --release` silently skips it and
+  leaves a stale binary in target/release. ALWAYS
+  `cargo build --release --features benchmarks --bin grout_bench`
+  before benching (the sweep/tile scripts do this; ad-hoc runs must
+  too). A stale bench binary produced a vacuous A/B on the 5090.
+- **Long prefill on sm_100 auto-enables the LPT path** (q_len >= 2048).
+  The raw LPT kernel had a KV head-stride bug (kv_len*D vs the cache's
+  max_seq*D — wrong output for kv heads >= 1 whenever kv_len !=
+  max_seq); the checked replacement (`fmha_prefill_gqa_lpt_checked`,
+  the only LPT kernel now) fixes it by construction at parity perf.
+  Any pre-existing B200 numbers taken with LPT on used the buggy
+  kernel. Include LPT tile/swizzle/sched in the 3 retune and run the
+  2b register audit at the winning shapes.
 
 ## 5b. Kernel-level attention comparison (FlashInfer / trtllm-gen)
 

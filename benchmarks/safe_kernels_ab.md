@@ -299,19 +299,28 @@ profile) were computed with the buggy kernel: throughput valid
 (identical op schedule), outputs numerically wrong; the published
 B200 safe bundle is unaffected (it disabled LPT).
 
-Paired attention us/call (sync-ops, deployed shape BM=16/BN=64/
-SWIZZLE=8/SCHED=1; mapped at its own BM=64/BN=32 optimum):
+**Measurement retraction and redo.** The first perf pass ran a stale
+`grout_bench` (feature-gated binary; plain `cargo build` skips it
+silently) — both "arms" were the old binary, so those numbers are
+void. Redone with freshly built per-commit binaries (raw arm from
+0c013c5, checked/mapped from HEAD), paired and order-alternating.
+Attention us/call (sync-ops, deployed shape BM=16/BN=64/SWIZZLE=8/
+SCHED=1; mapped at its own BM=64/BN=32 optimum):
 
 | pp | raw LPT | checked LPT | mapped |
 |---|---|---|---|
-| 2048 | 175.6/183.9/186.1 | 185.4/172.8/179.6 | 209.8/210.1 |
-| 8192 | 2473.0/2591.9/2481.5 | 2473.5/2499.8/2476.8 | 2746.3/2728.0/2696.4 |
+| 2048 | 200.6/171.1/187.3 (mean 186.3) | 185.0/178.3/191.9 (mean 185.1) | 211.3/229.4/211.6 |
+| 8192 | 2478.7/2435.0/2437.4 (mean 2450.4) | 2453.0/2444.2/2455.1 (mean 2450.8) | 2673.3/2708.5/2692.5 |
 
-Checked == raw (checked marginally faster on means at both sizes —
-the guide's checked-beats-unsafe result reproduces), and LPT remains
+Checked == raw (parity within round-to-round spread), and LPT remains
 ~9-15% faster than the mapped kernel at long prefill, so the LPT path
-stays — now safe and correct. Register audit: indirect (perf parity
-across paired rounds rules out a spill/occupancy regression; rerun the
+stays — now safe and correct. The same staleness voids the earlier
+same-day "before -> after" release-bench deltas quoted above for the
+derived-fact migration and fused ports (both readings were the stale
+binary; per-kernel IR identity is the perf evidence for those, and the
+fresh-binary current state reads 174.7/171.5/166.4 decode tok/s at
+pp=18/512/2048, tg=128). Register audit: indirect (perf parity across
+paired rounds rules out a spill/occupancy regression; rerun the
 runbook 2b cubin audit when JIT artifacts are available).
 
 **Census: 26 safe / 0 unsafe engine-invoked kernels** (+1 opt-in
