@@ -91,6 +91,7 @@ local load/store instructions in the disassembly.
 | checked-LPT, `BM=16 BN=32 SWIZZLE=8 SCHED=1 LAT=2` | 128 | 136 | 0 | 19 |
 | mapped prefill warmup, `BM=1 BN=32 LAT=2` | 128 | 64 | 0 | 8 |
 | mapped prefill, `BM=16 BN=32 LAT=2` | 128 | 1248 | 0 | 467 |
+| fused QK/RoPE/KV prefill | 255 | 416 | 0 | 58 |
 
 The merge matches the sm_120 resource reference (`REG 64`, `STACK 0`, zero
 `LDL/STL`). Placement is architecture-independent and matches on sm_100, but
@@ -211,3 +212,28 @@ The current tg=512 wrapper setting (`BN=64/NKS=8`) is the measured winner.
 At tg=128, `BN=64/NKS=8` is 0.59% faster than the current
 `BN=32/NKS=4` cell; that unpaired sub-percent margin is not sufficient to
 change the wrapper. No source or wrapper update was made.
+
+## Close-out
+
+- Revision and correctness gates passed; checked-LPT and mapped output were
+  byte-identical for the 2048-token smoke.
+- All seven kernels with documented sm_120 placement references match those
+  counts on sm_100. There is no bounds-check placement backend divergence in
+  this evaluation.
+- The merge is resource-clean and matches sm_120. Decode-split and the prefill
+  kernels spill on sm_100; the fused QK/RoPE/KV prefill cubin is the most severe
+  live case (`REG 255`, `STACK 416`, 58 `LDL/STL`).
+- The paired same-session decision is clear: checked-LPT cuts Attention time by
+  48.1% at pp=2048 and 51.6% at pp=8192 versus mapped attention at the requested
+  per-form tiles. Uninstrumented prefill improves by 2.75% and 8.13%.
+- `SWIZZLE=8`, `SCHED=1`, `LATENCY=2` remains the checked-LPT choice. The mini
+  sweep found no meaningful cross-length improvement.
+- The current-tree absolute prefill values are provisional, not a canonical
+  sweep refresh: they are about 1.85x slower than the July safe bundle. The
+  fused prefill QK/RoPE/KV kernel is the leading measured suspect, but a paired
+  safe-versus-historical-raw A/B is required to establish causality.
+- The partial decode grid confirms the existing tg=512 tile. No wrapper change
+  was justified at tg=128, and tg=2048 was not run within this allocation.
+
+Full retuning, canonical sweep refresh, and baseline reruns remain out of scope
+for this evaluation.
