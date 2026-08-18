@@ -2892,132 +2892,55 @@ pub mod kernels {
         }
     }
 
-    /// Prefill-specialized fusion for:
-    ///   q_norm + q_rope -> q_out
-    ///   k_norm + k_rope -> k_cache
-    ///   v                -> v_cache
-    ///
-    /// Grid is (seq_len, num_q_heads + num_kv_heads, 1). Each CTA computes
-    /// the row RMS/RoPE for both halves and stores both halves, avoiding the
-    /// older half-CTA path that duplicated the same D=128 math.
+
+    /// Prefill-specialized fused QK-norm + RoPE + KV append (safe; replaced
+    /// the raw pointer kernel): same fusion and (seq_len, num_q_heads +
+    /// num_kv_heads) grid. Straight-line kernel — every check runs once per
+    /// CTA; the only `unsafe` left is full-tensor mutable view construction,
+    /// and all loads/stores are checked.
     #[cutile::entry(print_ir=false,
-                       unchecked_accesses=true,
                        optimization_hints = (
                          sm_100 = (occupancy=1, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
-    unsafe fn qk_norm_rope_kv_prefill_raw_f16<
+    fn qk_norm_rope_kv_prefill_f16<
         const D: i32,
         const HALF_D: i32,
         const MAX_SEQ: i32,
     >(
-        q_ptr: *mut f16,
-        k_ptr: *mut f16,
-        v_ptr: *mut f16,
-        q_weight_ptr: *mut f16,
-        k_weight_ptr: *mut f16,
-        inv_freq_ptr: *mut f32,
-        q_out_ptr: *mut f16,
-        k_cache_ptr: *mut f16,
-        v_cache_ptr: *mut f16,
+        q: &Tensor<f16, { [-1, -1, D] }>,
+        k: &Tensor<f16, { [-1, -1, D] }>,
+        v: &Tensor<f16, { [-1, -1, D] }>,
+        q_weight: &Tensor<f16, { [D] }>,
+        k_weight: &Tensor<f16, { [D] }>,
+        inv_freq: &Tensor<f32, { [HALF_D] }>,
+        q_out: &Tensor<f16, { [-1, -1, D] }>,
+        k_cache: &Tensor<f16, { [-1, -1, D] }>,
+        v_cache: &Tensor<f16, { [-1, -1, D] }>,
         eps: f32,
         position_start: i32,
-        seq_len: i32,
         num_q_heads: i32,
-        num_kv_heads: i32,
     ) {
         let half_shape: Shape<{ [1, 1, HALF_D] }> = const_shape![1, 1, HALF_D];
         let half_shape_2d: Shape<{ [1, HALF_D] }> = const_shape![1, HALF_D];
 
-        let q_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(q_ptr) };
-        let k_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(k_ptr) };
-        let v_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(v_ptr) };
-        let q_weight_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(q_weight_ptr) };
-        let k_weight_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(k_weight_ptr) };
-        let q_out_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(q_out_ptr) };
-        let k_cache_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(k_cache_ptr) };
-        let v_cache_ptr: *mut f16 = unsafe { assume_div_by::<_, 16>(v_cache_ptr) };
-        let seq_len: i32 = unsafe { assume_bounds_lower::<_, 0>(seq_len) };
-        let num_q_heads: i32 = unsafe { assume_bounds_lower::<_, 0>(num_q_heads) };
-        let num_kv_heads: i32 = unsafe { assume_bounds_lower::<_, 0>(num_kv_heads) };
-
-        let tok: Token = new_token_unordered();
-
-        let q_shape: Shape<{ [-1, -1, D] }> = Shape::<{ [-1, -1, D] }> {
-            dims: &[seq_len, num_q_heads],
-        };
-        let q_strides: Array<{ [-1, -1, 1] }> = Array::<{ [-1, -1, 1] }> {
-            dims: &[num_q_heads * D, D],
-        };
-        let q_tv: Tensor<f16, { [-1, -1, D] }> =
-            unsafe { make_tensor_view(pointer_to_tile(q_ptr), q_shape, q_strides, tok) };
-        let q_out_tv: Tensor<f16, { [-1, -1, D] }> =
-            unsafe { make_tensor_view(pointer_to_tile(q_out_ptr), q_shape, q_strides, tok) };
-
-        let kv_shape: Shape<{ [-1, -1, D] }> = Shape::<{ [-1, -1, D] }> {
-            dims: &[seq_len, num_kv_heads],
-        };
-        let kv_strides: Array<{ [-1, -1, 1] }> = Array::<{ [-1, -1, 1] }> {
-            dims: &[num_kv_heads * D, D],
-        };
-        let k_tv: Tensor<f16, { [-1, -1, D] }> =
-            unsafe { make_tensor_view(pointer_to_tile(k_ptr), kv_shape, kv_strides, tok) };
-        let v_tv: Tensor<f16, { [-1, -1, D] }> =
-            unsafe { make_tensor_view(pointer_to_tile(v_ptr), kv_shape, kv_strides, tok) };
-
-        let cache_shape: Shape<{ [-1, -1, D] }> = Shape::<{ [-1, -1, D] }> {
-            dims: &[num_kv_heads, MAX_SEQ],
-        };
-        let cache_strides: Array<{ [-1, -1, 1] }> = Array::<{ [-1, -1, 1] }> {
-            dims: &[MAX_SEQ * D, D],
-        };
-        let k_cache_tv: Tensor<f16, { [-1, -1, D] }> = unsafe {
-            make_tensor_view(
-                pointer_to_tile(k_cache_ptr),
-                cache_shape,
-                cache_strides,
-                tok,
-            )
-        };
-        let v_cache_tv: Tensor<f16, { [-1, -1, D] }> = unsafe {
-            make_tensor_view(
-                pointer_to_tile(v_cache_ptr),
-                cache_shape,
-                cache_strides,
-                tok,
-            )
-        };
-
-        let w_shape: Shape<{ [D] }> = const_shape![D];
-        let w_strides: Array<{ [1] }> = Array::<{ [1] }> { dims: &[] };
-        let q_weight_tv: Tensor<f16, { [D] }> =
-            unsafe { make_tensor_view(pointer_to_tile(q_weight_ptr), w_shape, w_strides, tok) };
-        let k_weight_tv: Tensor<f16, { [D] }> =
-            unsafe { make_tensor_view(pointer_to_tile(k_weight_ptr), w_shape, w_strides, tok) };
-        let inv_shape: Shape<{ [HALF_D] }> = const_shape![HALF_D];
-        let inv_strides: Array<{ [1] }> = Array::<{ [1] }> { dims: &[] };
-        let inv_freq_tv: Tensor<f32, { [HALF_D] }> =
-            unsafe { make_tensor_view(pointer_to_tile(inv_freq_ptr), inv_shape, inv_strides, tok) };
-
-        let q_part: Partition<f16, { [1, 1, HALF_D] }> =
-            q_tv.partition_permuted(const_shape![1, 1, HALF_D], const_array![0, 1, 2]);
-        let k_part: Partition<f16, { [1, 1, HALF_D] }> =
-            k_tv.partition_permuted(const_shape![1, 1, HALF_D], const_array![0, 1, 2]);
-        let v_part: Partition<f16, { [1, 1, HALF_D] }> =
-            v_tv.partition_permuted(const_shape![1, 1, HALF_D], const_array![0, 1, 2]);
+        let q_part: Partition<f16, { [1, 1, HALF_D] }> = q.partition(half_shape);
+        let k_part: Partition<f16, { [1, 1, HALF_D] }> = k.partition(half_shape);
+        let v_part: Partition<f16, { [1, 1, HALF_D] }> = v.partition(half_shape);
         let q_weight_part: Partition<f16, { [HALF_D] }> =
-            q_weight_tv.partition_permuted(const_shape![HALF_D], const_array![0]);
+            q_weight.partition(const_shape![HALF_D]);
         let k_weight_part: Partition<f16, { [HALF_D] }> =
-            k_weight_tv.partition_permuted(const_shape![HALF_D], const_array![0]);
-        let inv_part: Partition<f32, { [HALF_D] }> =
-            inv_freq_tv.partition_permuted(const_shape![HALF_D], const_array![0]);
-
+            k_weight.partition(const_shape![HALF_D]);
+        let inv_part: Partition<f32, { [HALF_D] }> = inv_freq.partition(const_shape![HALF_D]);
+        // SAFETY: full-tensor mutable view construction only — the three
+        // outputs are distinct tensors and every store goes through the
+        // checked PartitionMut::store path.
         let mut q_out_part: PartitionMut<f16, { [1, 1, HALF_D] }> =
-            unsafe { q_out_tv.partition_full_mut(const_shape![1, 1, HALF_D]) };
+            unsafe { q_out.partition_full_mut(half_shape) };
         let mut k_cache_part: PartitionMut<f16, { [1, 1, HALF_D] }> =
-            unsafe { k_cache_tv.partition_full_mut(const_shape![1, 1, HALF_D]) };
+            unsafe { k_cache.partition_full_mut(half_shape) };
         let mut v_cache_part: PartitionMut<f16, { [1, 1, HALF_D] }> =
-            unsafe { v_cache_tv.partition_full_mut(const_shape![1, 1, HALF_D]) };
+            unsafe { v_cache.partition_full_mut(half_shape) };
 
         let pid: (i32, i32, i32) = get_tile_block_id();
         let seq_idx = pid.0;
@@ -3030,42 +2953,14 @@ pub mod kernels {
         };
 
         let x_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
-            load_view_tko(
-                &q_part,
-                [seq_idx, local_head, 0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            q_part.load([seq_idx, local_head, 0i32])
         } else {
-            load_view_tko(
-                &k_part,
-                [seq_idx, local_head, 0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            k_part.load([seq_idx, local_head, 0i32])
         };
         let x_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
-            load_view_tko(
-                &q_part,
-                [seq_idx, local_head, 1i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            q_part.load([seq_idx, local_head, 1i32])
         } else {
-            load_view_tko(
-                &k_part,
-                [seq_idx, local_head, 1i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            k_part.load([seq_idx, local_head, 1i32])
         };
         let x_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(x_lo_f16.reshape(half_shape_2d));
         let x_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(x_hi_f16.reshape(half_shape_2d));
@@ -3080,42 +2975,14 @@ pub mod kernels {
         let inv_rms: Tile<f32, { [1, HALF_D] }> = inv_rms.broadcast(half_shape_2d);
 
         let w_lo_f16: Tile<f16, { [HALF_D] }> = if is_q {
-            load_view_tko(
-                &q_weight_part,
-                [0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            q_weight_part.load([0i32])
         } else {
-            load_view_tko(
-                &k_weight_part,
-                [0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            k_weight_part.load([0i32])
         };
         let w_hi_f16: Tile<f16, { [HALF_D] }> = if is_q {
-            load_view_tko(
-                &q_weight_part,
-                [1i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            q_weight_part.load([1i32])
         } else {
-            load_view_tko(
-                &k_weight_part,
-                [1i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            )
+            k_weight_part.load([1i32])
         };
         let w_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(w_lo_f16.reshape(half_shape_2d));
         let w_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(w_hi_f16.reshape(half_shape_2d));
@@ -3123,14 +2990,7 @@ pub mod kernels {
         let norm_lo: Tile<f32, { [1, HALF_D] }> = x_lo * inv_rms * w_lo;
         let norm_hi: Tile<f32, { [1, HALF_D] }> = x_hi * inv_rms * w_hi;
 
-        let freq: Tile<f32, { [HALF_D] }> = load_view_tko(
-            &inv_part,
-            [0i32],
-            ordering::Weak,
-            scope::TileBlock,
-            Some(1i32),
-            tma::Disabled,
-        );
+        let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
         let pos_i: i32 = position_start + seq_idx;
         let pos: f32 = convert_scalar(pos_i);
         let pos: Tile<f32, { [HALF_D] }> = pos.broadcast(const_shape![HALF_D]);
@@ -3146,85 +3006,18 @@ pub mod kernels {
         let y_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = y_hi_f16_2d.reshape(half_shape);
 
         if is_q {
-            unsafe {
-                store_view_tko_mut(
-                    &mut q_out_part,
-                    y_lo_f16,
-                    [seq_idx, local_head, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(1i32),
-                    tma::Disabled,
-                );
-                store_view_tko_mut(
-                    &mut q_out_part,
-                    y_hi_f16,
-                    [seq_idx, local_head, 1i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(1i32),
-                    tma::Disabled,
-                );
-            }
+            q_out_part.store(y_lo_f16, [seq_idx, local_head, 0i32]);
+            q_out_part.store(y_hi_f16, [seq_idx, local_head, 1i32]);
         } else {
-            let v_lo: Tile<f16, { [1, 1, HALF_D] }> = load_view_tko(
-                &v_part,
-                [seq_idx, local_head, 0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            );
-            let v_hi: Tile<f16, { [1, 1, HALF_D] }> = load_view_tko(
-                &v_part,
-                [seq_idx, local_head, 1i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(1i32),
-                tma::Disabled,
-            );
+            let v_lo: Tile<f16, { [1, 1, HALF_D] }> = v_part.load([seq_idx, local_head, 0i32]);
+            let v_hi: Tile<f16, { [1, 1, HALF_D] }> = v_part.load([seq_idx, local_head, 1i32]);
             let cache_pos: i32 = position_start + seq_idx;
-            unsafe {
-                store_view_tko_mut(
-                    &mut k_cache_part,
-                    y_lo_f16,
-                    [local_head, cache_pos, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(1i32),
-                    tma::Disabled,
-                );
-                store_view_tko_mut(
-                    &mut k_cache_part,
-                    y_hi_f16,
-                    [local_head, cache_pos, 1i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(1i32),
-                    tma::Disabled,
-                );
-                store_view_tko_mut(
-                    &mut v_cache_part,
-                    v_lo,
-                    [local_head, cache_pos, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(1i32),
-                    tma::Disabled,
-                );
-                store_view_tko_mut(
-                    &mut v_cache_part,
-                    v_hi,
-                    [local_head, cache_pos, 1i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(1i32),
-                    tma::Disabled,
-                );
-            }
+            k_cache_part.store(y_lo_f16, [local_head, cache_pos, 0i32]);
+            k_cache_part.store(y_hi_f16, [local_head, cache_pos, 1i32]);
+            v_cache_part.store(v_lo, [local_head, cache_pos, 0i32]);
+            v_cache_part.store(v_hi, [local_head, cache_pos, 1i32]);
         }
     }
-
 
     /// Decode-specialized fused QK-norm + RoPE + KV append (safe;
     /// replaced the raw pointer kernel): same fusion
@@ -3370,8 +3163,7 @@ pub use kernels::{
     fmha_prefill_gqa_lpt_split, fmha_prefill_gqa_mapped, gather_row_f16, gemm_f16,
     group_gemm_f16_nt_desc, kv_cache_update_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge,
-    qk_norm_mapped_f16, qk_norm_rope_kv_decode_f16,
-    qk_norm_rope_kv_prefill_raw_f16,
+    qk_norm_mapped_f16, qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_f16,
     qk_rope_dynpos_mapped_f16, rms_norm_mapped_f16, rope_f16, rope_seq_dynpos_f16, rope_seq_f16,
     silu_mul_2d_f16, silu_mul_vec_f16, splitk_reduce_merge_mapped,
 };

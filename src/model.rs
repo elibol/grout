@@ -8,7 +8,7 @@ use crate::kernels::{
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
     fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
-    qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_raw_f16, qk_rope_dynpos_mapped_f16,
+    qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_f16, qk_rope_dynpos_mapped_f16,
     rms_norm_mapped_f16, rope_seq_dynpos_f16, rope_seq_f16, silu_mul_2d_f16,
     splitk_reduce_merge_mapped,
 };
@@ -4475,22 +4475,22 @@ impl Qwen3Engine {
         );
 
         let weights = &layer.weights;
+        // SAFETY: ctx-based execute is the unsafe API surface here; the
+        // kernel itself is safe.
         unsafe {
-            qk_norm_rope_kv_prefill_raw_f16(
-                q.device_pointer().clone(),
-                k.device_pointer().clone(),
-                v.device_pointer().clone(),
-                weights.q_norm.device_pointer().clone(),
-                weights.k_norm.device_pointer().clone(),
-                self.inv_freq.device_pointer().clone(),
-                out.device_pointer().clone(),
-                k_cache.device_pointer().clone(),
-                v_cache.device_pointer().clone(),
+            qk_norm_rope_kv_prefill_f16(
+                    &q,
+                &k,
+                &v,
+                &weights.q_norm,
+                &weights.k_norm,
+                &self.inv_freq,
+                &out,
+                &**k_cache,
+                &**v_cache,
                 self.cfg.rms_norm_eps,
                 position_start as i32,
-                seq_len as i32,
                 self.cfg.num_attention_heads as i32,
-                self.cfg.num_key_value_heads as i32,
             )
             .generics(vec![
                 self.cfg.head_dim.to_string(),
