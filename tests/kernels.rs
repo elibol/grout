@@ -3,7 +3,7 @@ use cuda_async::device_operation::{DeviceOp, value};
 use cuda_core::Device;
 use cutile::api::{self, DeviceOpReshape};
 use cutile::core::f16;
-use cutile::tensor::{IntoPartition, ToHostVec};
+use cutile::tensor::{IntoPartition, PartitionMut as _, ToHostVec};
 use cutile::tile_kernel::TileKernel;
 use grout::kernels::add_2d_f16;
 use std::sync::Arc;
@@ -342,14 +342,17 @@ fn qk_norm_rope_kv_prefill_safe_matches_reference() -> Result<()> {
         Ok(count) if count > 0 => {}
         _ => return Ok(()),
     }
-    use grout::kernels::qk_norm_rope_kv_prefill_f16;
+    use grout::kernels::{
+        k_norm_rope_v_prefill_f16, k_norm_rope_v_prefill_wide_f16, q_norm_rope_prefill_f16,
+        q_norm_rope_prefill_wide_f16,
+    };
     const D: usize = 128;
     const HALF_D: usize = 64;
     const MAX_SEQ: usize = 32;
     const NQ: usize = 4;
     const NKV: usize = 2;
-    const SEQ: usize = 4;
-    const POS0: usize = 3;
+    const SEQ: usize = 5;
+    const POS0: usize = 4;
     let total = NQ + NKV;
 
     let device = Device::new(0)?;
@@ -380,26 +383,68 @@ fn qk_norm_rope_kv_prefill_safe_matches_reference() -> Result<()> {
     let qw = Arc::new(api::copy_host_vec_to_device(&qw_h).reshape(&[D]).sync_on(&stream)?);
     let kw = Arc::new(api::copy_host_vec_to_device(&kw_h).reshape(&[D]).sync_on(&stream)?);
     let inv = Arc::new(api::copy_host_vec_to_device(&inv_host).reshape(&[HALF_D]).sync_on(&stream)?);
-    let q_out = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
-    let k_cache = api::zeros::<f16>(&[NKV, MAX_SEQ, D]).sync_on(&stream)?;
-    let v_cache = api::zeros::<f16>(&[NKV, MAX_SEQ, D]).sync_on(&stream)?;
+    let mut q_out = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
+    let mut k_cache = api::zeros::<f16>(&[NKV, MAX_SEQ, D]).sync_on(&stream)?;
+    let mut v_cache = api::zeros::<f16>(&[NKV, MAX_SEQ, D]).sync_on(&stream)?;
 
-    qk_norm_rope_kv_prefill_f16(
+    let map_generics = || ["1".to_string(), "1".to_string(), "2".to_string()];
+    // Wide bulk over the BM-aligned prefix, per-row subrange kernel over
+    // the tail — the same split the engine host performs.
+    const BM: usize = 2;
+    const BULK: usize = SEQ - SEQ % BM;
+    const TAIL: usize = SEQ - BULK;
+    q_norm_rope_prefill_wide_f16(&q, &qw, &inv, &q_out, 1e-6f32, POS0 as i32)
+        .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
+        .grid(((BULK / BM) as u32, NQ as u32, 1u32))
+        .sync_on(&stream)?;
+    q_norm_rope_prefill_f16(
+        (&mut q_out)
+            .partition([1, 1, HALF_D])
+            .map([1, 1, 2], (TAIL * NQ) as u32),
         &q,
-        &k,
-        &v,
         &qw,
-        &kw,
         &inv,
-        &q_out,
-        &k_cache,
-        &v_cache,
         1e-6f32,
         POS0 as i32,
-        NQ as i32,
+        BULK as i32,
+        TAIL as i32,
     )
-    .generics(vec![D.to_string(), HALF_D.to_string(), MAX_SEQ.to_string()])
-    .grid((SEQ as u32, total as u32, 1u32))
+    .generics(
+        [D.to_string(), HALF_D.to_string()]
+            .into_iter()
+            .chain(map_generics())
+            .collect(),
+    )
+    .sync_on(&stream)?;
+
+    // POS0=4 is BM-aligned, so the KV side takes the same wide-bulk +
+    // per-row-tail split the engine host performs.
+    k_norm_rope_v_prefill_wide_f16(&k, &v, &kw, &inv, &k_cache, &v_cache, 1e-6f32, POS0 as i32)
+        .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
+        .grid(((BULK / BM) as u32, NKV as u32, 1u32))
+        .sync_on(&stream)?;
+    k_norm_rope_v_prefill_f16(
+        (&mut k_cache)
+            .partition([1, 1, HALF_D])
+            .map([1, 1, 2], (NKV * TAIL) as u32),
+        (&mut v_cache)
+            .partition([1, 1, HALF_D])
+            .map([1, 1, 2], (NKV * TAIL) as u32),
+        &k,
+        &v,
+        &kw,
+        &inv,
+        1e-6f32,
+        POS0 as i32,
+        (POS0 + BULK) as i32,
+        TAIL as i32,
+    )
+    .generics(
+        [D.to_string(), HALF_D.to_string()]
+            .into_iter()
+            .chain(map_generics())
+            .collect(),
+    )
     .sync_on(&stream)?;
 
     let q_got = q_out.to_host_vec().sync_on(&stream)?;

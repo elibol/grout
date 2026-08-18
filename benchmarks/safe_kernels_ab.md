@@ -332,6 +332,22 @@ GROUT_FMHA_PREFILL_GQA_LPT with the checked kernel there (sm_100
 auto-enables LPT at q_len >= 2048; the old auto-path ran the buggy raw
 kernel) and rerun the runbook 2b audit at the retuned shapes.
 
+## Fused prefill rebuilt as a wide-tile kernel family (2026-08-18)
+
+`qk_norm_rope_kv_prefill_f16` (REG 255 / STACK 416 / +10% checked
+penalty on sm_100; 576 us/layer on the 5090, ~6x over its bandwidth
+floor) was replaced by a four-kernel family: wide-tile Q and K+V bulk
+kernels ([BM, 1, HALF_D] source tiles, BM=32 default via
+GROUT_QK_PREFILL_BM, per-row RoPE positions via iota, no is_q
+branching) plus per-row mapped sub-range kernels for the BM-remainder
+rows and non-aligned cache starts. 5090 paired A/B: op 576.5 -> 49.4
+us/layer (-91%); prefill e2e 80 -> 61 ms at pp=2048 (-24%), 476 -> 404
+ms at pp=8192 (-15%); decode and output text unchanged. Check
+placement: per-row kernels discharge stores by construction (sub-range
+validation + source-row lattice checks in kernel, once per CTA); wide
+kernels carry 8/16 one-shot grid-id checks, amortized over BM rows.
+sm_100 validation pending (occupancy=2 hints inherited).
+
 ## Engine GEMM policy
 
 Any cuTile GEMM wired into engine paths must sit behind

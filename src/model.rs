@@ -8,7 +8,9 @@ use crate::kernels::{
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt_checked,
     fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
-    qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_f16, qk_rope_dynpos_mapped_f16,
+    k_norm_rope_v_prefill_f16, k_norm_rope_v_prefill_wide_f16, q_norm_rope_prefill_f16,
+    q_norm_rope_prefill_wide_f16,
+    qk_norm_rope_kv_decode_f16, qk_rope_dynpos_mapped_f16,
     rms_norm_mapped_f16, rope_seq_dynpos_f16, rope_seq_f16, silu_mul_2d_f16,
     splitk_reduce_merge_mapped,
 };
@@ -77,6 +79,8 @@ const VEC_BLOCK: usize = 128;
 // to amortize launch overhead while saturating SMs. Override with
 // GROUT_KV_CACHE_BM_S.
 const KV_CACHE_BM_S_DEFAULT: usize = 16;
+// BM (seq rows per CTA) for the wide prefill Q norm+RoPE kernel.
+const QK_PREFILL_BM_DEFAULT: usize = 32;
 // EMBED_BLOCK: tiles hidden_size (= 2560) in embedding_batch_f16. Picked
 // from the 2026-04-20 sweep: 1024 wins (138.8 t/s decode) over 128
 // (126.1 t/s) by ~10%. 512 is effectively tied with 1024; 2048
@@ -4442,17 +4446,20 @@ impl Qwen3Engine {
             self.max_seq_len
         );
 
+        let (k_cache, v_cache) = {
+            let state = &mut self.layers[layer_idx].state;
+            (
+                state
+                    .k_cache
+                    .take()
+                    .context("missing k_cache in layer state")?,
+                state
+                    .v_cache
+                    .take()
+                    .context("missing v_cache in layer state")?,
+            )
+        };
         let layer = &self.layers[layer_idx];
-        let k_cache = layer
-            .state
-            .k_cache
-            .as_ref()
-            .context("missing k_cache in layer state")?;
-        let v_cache = layer
-            .state
-            .v_cache
-            .as_ref()
-            .context("missing v_cache in layer state")?;
         ensure!(
             k_cache.shape()
                 == vec![
@@ -4475,34 +4482,126 @@ impl Qwen3Engine {
         );
 
         let weights = &layer.weights;
+        let half_d = self.cfg.head_dim / 2;
+        let attn_heads = self.cfg.num_attention_heads;
+        let map_generics = ["1".to_string(), "1".to_string(), "2".to_string()];
+        let mut out = out;
+        // Q half: wide [BM, 1, HALF_D] tiles over the BM-aligned row
+        // prefix, per-row mapped kernel over the remainder rows.
+        let bm = env_usize_or("GROUT_QK_PREFILL_BM", QK_PREFILL_BM_DEFAULT).max(1);
+        let bulk_rows = seq_len - seq_len % bm;
+        let tail_rows = seq_len - bulk_rows;
         // SAFETY: ctx-based execute is the unsafe API surface here; the
-        // kernel itself is safe.
-        unsafe {
-            qk_norm_rope_kv_prefill_f16(
+        // split kernels themselves are safe.
+        if bulk_rows > 0 {
+            unsafe {
+                q_norm_rope_prefill_wide_f16(
                     &q,
-                &k,
-                &v,
-                &weights.q_norm,
-                &weights.k_norm,
-                &self.inv_freq,
-                &out,
-                &**k_cache,
-                &**v_cache,
-                self.cfg.rms_norm_eps,
-                position_start as i32,
-                self.cfg.num_attention_heads as i32,
-            )
-            .generics(vec![
-                self.cfg.head_dim.to_string(),
-                (self.cfg.head_dim / 2).to_string(),
-                self.max_seq_len.to_string(),
-            ])
-            .grid((
-                seq_len as u32,
-                (self.cfg.num_attention_heads + self.cfg.num_key_value_heads) as u32,
-                1u32,
-            ))
-            .execute(ctx)?;
+                    &weights.q_norm,
+                    &self.inv_freq,
+                    &out,
+                    self.cfg.rms_norm_eps,
+                    position_start as i32,
+                )
+                .generics(vec![
+                    self.cfg.head_dim.to_string(),
+                    half_d.to_string(),
+                    bm.to_string(),
+                ])
+                .grid(((bulk_rows / bm) as u32, attn_heads as u32, 1u32))
+                .execute(ctx)?;
+            }
+        }
+        if tail_rows > 0 {
+            let q_blocks = (tail_rows * attn_heads) as u32;
+            unsafe {
+                q_norm_rope_prefill_f16(
+                    (&mut out).partition([1, 1, half_d]).map([1, 1, 2], q_blocks),
+                    &q,
+                    &weights.q_norm,
+                    &self.inv_freq,
+                    self.cfg.rms_norm_eps,
+                    position_start as i32,
+                    bulk_rows as i32,
+                    tail_rows as i32,
+                )
+                .generics(
+                    [self.cfg.head_dim.to_string(), half_d.to_string()]
+                        .into_iter()
+                        .chain(map_generics.iter().cloned())
+                        .collect(),
+                )
+                .execute(ctx)?;
+            }
+        }
+
+        // KV half: wide kernel over the BM-aligned row prefix when the
+        // cache start is BM-aligned (prefill from position 0 always is),
+        // per-row sub-range kernel over the remainder.
+        let kv_heads = self.cfg.num_key_value_heads;
+        let kv_bulk = if position_start % bm == 0 {
+            seq_len - seq_len % bm
+        } else {
+            0
+        };
+        let kv_tail = seq_len - kv_bulk;
+        if kv_bulk > 0 {
+            unsafe {
+                k_norm_rope_v_prefill_wide_f16(
+                    &k,
+                    &v,
+                    &weights.k_norm,
+                    &self.inv_freq,
+                    &*k_cache,
+                    &*v_cache,
+                    self.cfg.rms_norm_eps,
+                    position_start as i32,
+                )
+                .generics(vec![
+                    self.cfg.head_dim.to_string(),
+                    half_d.to_string(),
+                    bm.to_string(),
+                ])
+                .grid(((kv_bulk / bm) as u32, kv_heads as u32, 1u32))
+                .execute(ctx)?;
+            }
+        }
+        if kv_tail > 0 {
+            let kv_blocks = (kv_heads * kv_tail) as u32;
+            let k_part = k_cache
+                .partition([1, 1, half_d])
+                .map([1, 1, 2], kv_blocks);
+            let v_part = v_cache
+                .partition([1, 1, half_d])
+                .map([1, 1, 2], kv_blocks);
+            let result = unsafe {
+                k_norm_rope_v_prefill_f16(
+                    value(k_part),
+                    value(v_part),
+                    &k,
+                    &v,
+                    &weights.k_norm,
+                    &self.inv_freq,
+                    self.cfg.rms_norm_eps,
+                    position_start as i32,
+                    (position_start + kv_bulk) as i32,
+                    kv_tail as i32,
+                )
+                .generics(
+                    [self.cfg.head_dim.to_string(), half_d.to_string()]
+                        .into_iter()
+                        .chain(map_generics.iter().cloned())
+                        .collect(),
+                )
+                .execute(ctx)?
+            };
+            let state = &mut self.layers[layer_idx].state;
+            state.k_cache = Some(Arc::new(result.0.unpartition()));
+            state.v_cache = Some(Arc::new(result.1.unpartition()));
+        } else {
+            let state = &mut self.layers[layer_idx].state;
+            state.k_cache = Some(k_cache);
+            state.v_cache = Some(v_cache);
         }
 
         Ok(out)

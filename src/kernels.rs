@@ -2811,129 +2811,386 @@ pub mod kernels {
     }
 
 
-    /// Prefill-specialized fused QK-norm + RoPE + KV append (safe; replaced
-    /// the raw pointer kernel): same fusion and (seq_len, num_q_heads +
-    /// num_kv_heads) grid. Straight-line kernel — every check runs once per
-    /// CTA; the only `unsafe` left is full-tensor mutable view construction,
-    /// and all loads/stores are checked.
+    /// Bulk Q half of the prefill fused norm+RoPE (split from the former
+    /// single qk_norm_rope_kv_prefill kernel, whose is_q branching cost
+    /// REG 255 / STACK 416 on sm_100, and whose [1, 1, HALF_D] per-row
+    /// tiles ran ~6x over the bandwidth floor): wide [BM, 1, HALF_D] tiles
+    /// on a (seq_len / BM, num_q_heads) grid, per-row RoPE positions via
+    /// iota. Straight-line, no branching; the handful of grid-id access
+    /// checks run once per CTA, amortized over BM rows. Covers the
+    /// BM-aligned row prefix; q_norm_rope_prefill_f16 takes the remainder.
     #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
                        optimization_hints = (
                          sm_100 = (occupancy=2, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
-    fn qk_norm_rope_kv_prefill_f16<
+    fn q_norm_rope_prefill_wide_f16<
         const D: i32,
         const HALF_D: i32,
-        const MAX_SEQ: i32,
+        const BM: i32,
     >(
         q: &Tensor<f16, { [-1, -1, D] }>,
-        k: &Tensor<f16, { [-1, -1, D] }>,
-        v: &Tensor<f16, { [-1, -1, D] }>,
         q_weight: &Tensor<f16, { [D] }>,
-        k_weight: &Tensor<f16, { [D] }>,
         inv_freq: &Tensor<f32, { [HALF_D] }>,
         q_out: &Tensor<f16, { [-1, -1, D] }>,
+        eps: f32,
+        position_start: i32,
+    ) {
+        let tile_shape: Shape<{ [BM, 1, HALF_D] }> = const_shape![BM, 1, HALF_D];
+        let shape_2d: Shape<{ [BM, HALF_D] }> = const_shape![BM, HALF_D];
+        let q_part: Partition<f16, { [BM, 1, HALF_D] }> = q.partition(tile_shape);
+        let w_part: Partition<f16, { [HALF_D] }> = q_weight.partition(const_shape![HALF_D]);
+        let inv_part: Partition<f32, { [HALF_D] }> = inv_freq.partition(const_shape![HALF_D]);
+        // SAFETY: full-tensor mutable view construction only — every store
+        // goes through the checked PartitionMut::store path.
+        let mut out_part: PartitionMut<f16, { [BM, 1, HALF_D] }> =
+            unsafe { q_out.partition_full_mut(tile_shape) };
+
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let m_blk = pid.0;
+        let head_idx = pid.1;
+
+        let x_lo_f16: Tile<f16, { [BM, 1, HALF_D] }> = q_part.load([m_blk, head_idx, 0i32]);
+        let x_hi_f16: Tile<f16, { [BM, 1, HALF_D] }> = q_part.load([m_blk, head_idx, 1i32]);
+        let x_lo: Tile<f32, { [BM, HALF_D] }> = convert_tile(x_lo_f16.reshape(shape_2d));
+        let x_hi: Tile<f32, { [BM, HALF_D] }> = convert_tile(x_hi_f16.reshape(shape_2d));
+
+        let rms_vec: Tile<f32, { [BM, HALF_D] }> = x_lo * x_lo + x_hi * x_hi;
+        let rms: Tile<f32, { [BM] }> = reduce_sum(rms_vec, 1i32);
+        let rms: Tile<f32, { [BM, 1] }> = rms.reshape(const_shape![BM, 1]);
+        let n: f32 = convert_scalar(D);
+        let n_t: Tile<f32, { [BM, 1] }> = n.broadcast(const_shape![BM, 1]);
+        let eps_t: Tile<f32, { [BM, 1] }> = eps.broadcast(const_shape![BM, 1]);
+        let inv_rms: Tile<f32, { [BM, 1] }> = rsqrt(true_div(rms, n_t) + eps_t, ftz::Disabled);
+        let inv_rms: Tile<f32, { [BM, HALF_D] }> = inv_rms.broadcast(shape_2d);
+
+        let w_lo_f16: Tile<f16, { [HALF_D] }> = w_part.load([0i32]);
+        let w_hi_f16: Tile<f16, { [HALF_D] }> = w_part.load([1i32]);
+        let w_lo_f32: Tile<f32, { [HALF_D] }> = convert_tile(w_lo_f16);
+        let w_hi_f32: Tile<f32, { [HALF_D] }> = convert_tile(w_hi_f16);
+        let w_lo: Tile<f32, { [BM, HALF_D] }> =
+            w_lo_f32.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
+        let w_hi: Tile<f32, { [BM, HALF_D] }> =
+            w_hi_f32.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
+
+        let norm_lo: Tile<f32, { [BM, HALF_D] }> = x_lo * inv_rms * w_lo;
+        let norm_hi: Tile<f32, { [BM, HALF_D] }> = x_hi * inv_rms * w_hi;
+
+        let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
+        let freq2: Tile<f32, { [BM, HALF_D] }> =
+            freq.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
+        let pos_base: i32 = position_start + m_blk * BM;
+        let pos_i: Tile<i32, { [BM] }> =
+            pos_base.broadcast(const_shape![BM]) + iota(const_shape![BM]);
+        let pos_f: Tile<f32, { [BM] }> = convert_tile(pos_i);
+        let pos2: Tile<f32, { [BM, HALF_D] }> =
+            pos_f.reshape(const_shape![BM, 1]).broadcast(shape_2d);
+        let theta: Tile<f32, { [BM, HALF_D] }> = pos2 * freq2;
+        let cos_t: Tile<f32, { [BM, HALF_D] }> = cos(theta);
+        let sin_t: Tile<f32, { [BM, HALF_D] }> = sin(theta);
+
+        let y_lo: Tile<f32, { [BM, HALF_D] }> = norm_lo * cos_t - norm_hi * sin_t;
+        let y_hi: Tile<f32, { [BM, HALF_D] }> = norm_hi * cos_t + norm_lo * sin_t;
+        let y_lo_f16_2d: Tile<f16, { [BM, HALF_D] }> = convert_tile(y_lo);
+        let y_hi_f16_2d: Tile<f16, { [BM, HALF_D] }> = convert_tile(y_hi);
+        let y_lo_f16: Tile<f16, { [BM, 1, HALF_D] }> = y_lo_f16_2d.reshape(tile_shape);
+        let y_hi_f16: Tile<f16, { [BM, 1, HALF_D] }> = y_hi_f16_2d.reshape(tile_shape);
+
+        out_part.store(y_lo_f16, [m_blk, head_idx, 0i32]);
+        out_part.store(y_hi_f16, [m_blk, head_idx, 1i32]);
+    }
+
+    /// Row-subrange Q half of the prefill fused norm+RoPE: per-row
+    /// [1, 1, HALF_D] tiles mapped over q_out rows [row_start,
+    /// row_start + num_rows), used for the rows the wide kernel's BM
+    /// alignment leaves over (and for whole short prompts). Stores
+    /// discharge by construction through the sub-ranged index stream; q
+    /// loads ride the derived cross-tensor launch facts; the sub-range
+    /// validation itself is a one-shot in-kernel check, so no deny. Host
+    /// contract: q_out partitioned [1, 1, HALF_D].map([1, 1, 2],
+    /// num_rows * num_q_heads).
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (occupancy=2, max_divisibility=16,),
+                         sm_120 = (occupancy=1, max_divisibility=16,),
+                       ))]
+    fn q_norm_rope_prefill_f16<
+        const D: i32,
+        const HALF_D: i32,
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut q_out: MappedPartitionMut<f16, { [1, 1, HALF_D] }, MAP_SHAPE>,
+        q: &Tensor<f16, { [-1, -1, D] }>,
+        q_weight: &Tensor<f16, { [D] }>,
+        inv_freq: &Tensor<f32, { [HALF_D] }>,
+        eps: f32,
+        position_start: i32,
+        row_start: i32,
+        num_rows: i32,
+    ) {
+        let half_shape: Shape<{ [1, 1, HALF_D] }> = const_shape![1, 1, HALF_D];
+        let half_shape_2d: Shape<{ [1, HALF_D] }> = const_shape![1, HALF_D];
+        let q_part: Partition<f16, { [1, 1, HALF_D] }> = q.partition(half_shape);
+        let q_weight_part: Partition<f16, { [HALF_D] }> =
+            q_weight.partition(const_shape![HALF_D]);
+        let inv_part: Partition<f32, { [HALF_D] }> = inv_freq.partition(const_shape![HALF_D]);
+
+        for index in q_out.iter_indices_within([
+            (row_start, num_rows),
+            (0i32, -1i32),
+            (0i32, -1i32),
+        ]) {
+            let [seq_idx, head_idx, half_idx] = index.coords();
+
+            let x_lo_f16: Tile<f16, { [1, 1, HALF_D] }> =
+                q_part.load([seq_idx, head_idx, 0i32]);
+            let x_hi_f16: Tile<f16, { [1, 1, HALF_D] }> =
+                q_part.load([seq_idx, head_idx, 1i32]);
+            let x_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(x_lo_f16.reshape(half_shape_2d));
+            let x_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(x_hi_f16.reshape(half_shape_2d));
+
+            let rms_vec: Tile<f32, { [1, HALF_D] }> = x_lo * x_lo + x_hi * x_hi;
+            let rms: Tile<f32, { [1] }> = reduce_sum(rms_vec, 1i32);
+            let rms: Tile<f32, { [] }> = rms.reshape(const_shape![]);
+            let n: f32 = convert_scalar(D);
+            let inv_rms: Tile<f32, { [] }> =
+                true_div(rms, scalar_to_tile(n)) + scalar_to_tile(eps);
+            let inv_rms: Tile<f32, { [] }> = rsqrt(inv_rms, ftz::Disabled);
+            let inv_rms: f32 = tile_to_scalar(inv_rms);
+            let inv_rms: Tile<f32, { [1, HALF_D] }> = inv_rms.broadcast(half_shape_2d);
+
+            let w_lo_f16: Tile<f16, { [HALF_D] }> = q_weight_part.load([0i32]);
+            let w_hi_f16: Tile<f16, { [HALF_D] }> = q_weight_part.load([1i32]);
+            let w_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(w_lo_f16.reshape(half_shape_2d));
+            let w_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(w_hi_f16.reshape(half_shape_2d));
+
+            let norm_lo: Tile<f32, { [1, HALF_D] }> = x_lo * inv_rms * w_lo;
+            let norm_hi: Tile<f32, { [1, HALF_D] }> = x_hi * inv_rms * w_hi;
+
+            let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
+            let pos_i: i32 = position_start + seq_idx;
+            let pos: f32 = convert_scalar(pos_i);
+            let pos: Tile<f32, { [HALF_D] }> = pos.broadcast(const_shape![HALF_D]);
+            let theta: Tile<f32, { [1, HALF_D] }> = (pos * freq).reshape(half_shape_2d);
+            let cos_t: Tile<f32, { [1, HALF_D] }> = cos(theta);
+            let sin_t: Tile<f32, { [1, HALF_D] }> = sin(theta);
+
+            let y_lo: Tile<f32, { [1, HALF_D] }> = norm_lo * cos_t - norm_hi * sin_t;
+            let y_hi: Tile<f32, { [1, HALF_D] }> = norm_hi * cos_t + norm_lo * sin_t;
+            let y_lo_f16_2d: Tile<f16, { [1, HALF_D] }> = convert_tile(y_lo);
+            let y_hi_f16_2d: Tile<f16, { [1, HALF_D] }> = convert_tile(y_hi);
+            let y_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = y_lo_f16_2d.reshape(half_shape);
+            let y_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = y_hi_f16_2d.reshape(half_shape);
+
+            let y_f16: Tile<f16, { [1, 1, HALF_D] }> = if half_idx == 0i32 {
+                y_lo_f16
+            } else {
+                y_hi_f16
+            };
+            q_out.store(y_f16, index);
+        }
+    }
+
+    /// Bulk K+V half of the prefill fused norm+RoPE+append: wide source
+    /// tiles [BM, 1, HALF_D] and cache tiles [1, BM, HALF_D] on a
+    /// (seq_len / BM, kv_heads) grid, per-row RoPE positions via iota.
+    /// Requires position_start % BM == 0 (host-checked; the per-row
+    /// kernel handles everything else). Straight-line, no branching;
+    /// grid-id access checks run once per CTA, amortized over BM rows.
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (occupancy=2, max_divisibility=16,),
+                         sm_120 = (occupancy=1, max_divisibility=16,),
+                       ))]
+    fn k_norm_rope_v_prefill_wide_f16<
+        const D: i32,
+        const HALF_D: i32,
+        const BM: i32,
+    >(
+        k: &Tensor<f16, { [-1, -1, D] }>,
+        v: &Tensor<f16, { [-1, -1, D] }>,
+        k_weight: &Tensor<f16, { [D] }>,
+        inv_freq: &Tensor<f32, { [HALF_D] }>,
         k_cache: &Tensor<f16, { [-1, -1, D] }>,
         v_cache: &Tensor<f16, { [-1, -1, D] }>,
         eps: f32,
         position_start: i32,
-        num_q_heads: i32,
+    ) {
+        let src_shape: Shape<{ [BM, 1, HALF_D] }> = const_shape![BM, 1, HALF_D];
+        let cache_shape: Shape<{ [1, BM, HALF_D] }> = const_shape![1, BM, HALF_D];
+        let shape_2d: Shape<{ [BM, HALF_D] }> = const_shape![BM, HALF_D];
+        let k_part: Partition<f16, { [BM, 1, HALF_D] }> = k.partition(src_shape);
+        let v_part: Partition<f16, { [BM, 1, HALF_D] }> = v.partition(src_shape);
+        let w_part: Partition<f16, { [HALF_D] }> = k_weight.partition(const_shape![HALF_D]);
+        let inv_part: Partition<f32, { [HALF_D] }> = inv_freq.partition(const_shape![HALF_D]);
+        // SAFETY: full-tensor mutable view construction only — the two
+        // caches are distinct tensors and every store goes through the
+        // checked PartitionMut::store path.
+        let mut k_cache_part: PartitionMut<f16, { [1, BM, HALF_D] }> =
+            unsafe { k_cache.partition_full_mut(cache_shape) };
+        let mut v_cache_part: PartitionMut<f16, { [1, BM, HALF_D] }> =
+            unsafe { v_cache.partition_full_mut(cache_shape) };
+
+        let pid: (i32, i32, i32) = get_tile_block_id();
+        let m_blk = pid.0;
+        let head_idx = pid.1;
+        let cache_blk: i32 = position_start / BM + m_blk;
+
+        let x_lo_f16: Tile<f16, { [BM, 1, HALF_D] }> = k_part.load([m_blk, head_idx, 0i32]);
+        let x_hi_f16: Tile<f16, { [BM, 1, HALF_D] }> = k_part.load([m_blk, head_idx, 1i32]);
+        let v_lo_f16: Tile<f16, { [BM, 1, HALF_D] }> = v_part.load([m_blk, head_idx, 0i32]);
+        let v_hi_f16: Tile<f16, { [BM, 1, HALF_D] }> = v_part.load([m_blk, head_idx, 1i32]);
+        let x_lo: Tile<f32, { [BM, HALF_D] }> = convert_tile(x_lo_f16.reshape(shape_2d));
+        let x_hi: Tile<f32, { [BM, HALF_D] }> = convert_tile(x_hi_f16.reshape(shape_2d));
+
+        let rms_vec: Tile<f32, { [BM, HALF_D] }> = x_lo * x_lo + x_hi * x_hi;
+        let rms: Tile<f32, { [BM] }> = reduce_sum(rms_vec, 1i32);
+        let rms: Tile<f32, { [BM, 1] }> = rms.reshape(const_shape![BM, 1]);
+        let n: f32 = convert_scalar(D);
+        let n_t: Tile<f32, { [BM, 1] }> = n.broadcast(const_shape![BM, 1]);
+        let eps_t: Tile<f32, { [BM, 1] }> = eps.broadcast(const_shape![BM, 1]);
+        let inv_rms: Tile<f32, { [BM, 1] }> = rsqrt(true_div(rms, n_t) + eps_t, ftz::Disabled);
+        let inv_rms: Tile<f32, { [BM, HALF_D] }> = inv_rms.broadcast(shape_2d);
+
+        let w_lo_f16: Tile<f16, { [HALF_D] }> = w_part.load([0i32]);
+        let w_hi_f16: Tile<f16, { [HALF_D] }> = w_part.load([1i32]);
+        let w_lo_f32: Tile<f32, { [HALF_D] }> = convert_tile(w_lo_f16);
+        let w_hi_f32: Tile<f32, { [HALF_D] }> = convert_tile(w_hi_f16);
+        let w_lo: Tile<f32, { [BM, HALF_D] }> =
+            w_lo_f32.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
+        let w_hi: Tile<f32, { [BM, HALF_D] }> =
+            w_hi_f32.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
+
+        let norm_lo: Tile<f32, { [BM, HALF_D] }> = x_lo * inv_rms * w_lo;
+        let norm_hi: Tile<f32, { [BM, HALF_D] }> = x_hi * inv_rms * w_hi;
+
+        let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
+        let freq2: Tile<f32, { [BM, HALF_D] }> =
+            freq.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
+        let pos_base: i32 = position_start + m_blk * BM;
+        let pos_i: Tile<i32, { [BM] }> =
+            pos_base.broadcast(const_shape![BM]) + iota(const_shape![BM]);
+        let pos_f: Tile<f32, { [BM] }> = convert_tile(pos_i);
+        let pos2: Tile<f32, { [BM, HALF_D] }> =
+            pos_f.reshape(const_shape![BM, 1]).broadcast(shape_2d);
+        let theta: Tile<f32, { [BM, HALF_D] }> = pos2 * freq2;
+        let cos_t: Tile<f32, { [BM, HALF_D] }> = cos(theta);
+        let sin_t: Tile<f32, { [BM, HALF_D] }> = sin(theta);
+
+        let y_lo: Tile<f32, { [BM, HALF_D] }> = norm_lo * cos_t - norm_hi * sin_t;
+        let y_hi: Tile<f32, { [BM, HALF_D] }> = norm_hi * cos_t + norm_lo * sin_t;
+        let y_lo_f16_2d: Tile<f16, { [BM, HALF_D] }> = convert_tile(y_lo);
+        let y_hi_f16_2d: Tile<f16, { [BM, HALF_D] }> = convert_tile(y_hi);
+        let y_lo_f16: Tile<f16, { [1, BM, HALF_D] }> = y_lo_f16_2d.reshape(cache_shape);
+        let y_hi_f16: Tile<f16, { [1, BM, HALF_D] }> = y_hi_f16_2d.reshape(cache_shape);
+        let v_lo_c: Tile<f16, { [1, BM, HALF_D] }> = v_lo_f16.reshape(cache_shape);
+        let v_hi_c: Tile<f16, { [1, BM, HALF_D] }> = v_hi_f16.reshape(cache_shape);
+
+        k_cache_part.store(y_lo_f16, [head_idx, cache_blk, 0i32]);
+        k_cache_part.store(y_hi_f16, [head_idx, cache_blk, 1i32]);
+        v_cache_part.store(v_lo_c, [head_idx, cache_blk, 0i32]);
+        v_cache_part.store(v_hi_c, [head_idx, cache_blk, 1i32]);
+    }
+
+    /// K+V half of the prefill fused norm+RoPE+append (the other split of
+    /// the former single kernel): mapped k_cache/v_cache tiles
+    /// [1, 1, HALF_D] on the (kv_heads, max_seq, 2) logical grid, seq axis
+    /// sub-ranged to [range_start, range_start + range_len) via
+    /// iter_indices_within_with — one branded index stream, so both cache
+    /// stores discharge by construction, and the RoPE position is the cache
+    /// row coordinate itself. The k/v source loads index `pos -
+    /// position_start` (arithmetic-derived — a named value-lattice case),
+    /// so their checks stay in the kernel, once per CTA in a straight-line
+    /// body. Host contract: both caches partitioned
+    /// [1, 1, HALF_D].map([1, 1, 2], kv_heads * range_len) with identical
+    /// shapes. Source row for cache row `pos` is `pos - position_start`;
+    /// used for the rows the wide KV kernel's alignment leaves over (and
+    /// whole updates when position_start is not BM-aligned).
+    #[cutile::entry(print_ir=false,
+                       unchecked_accesses=false,
+                       optimization_hints = (
+                         sm_100 = (occupancy=2, max_divisibility=16,),
+                         sm_120 = (occupancy=1, max_divisibility=16,),
+                       ))]
+    fn k_norm_rope_v_prefill_f16<
+        const D: i32,
+        const HALF_D: i32,
+        const MAP_SHAPE: [i32; 3],
+    >(
+        mut k_cache: MappedPartitionMut<f16, { [1, 1, HALF_D] }, MAP_SHAPE>,
+        mut v_cache: MappedPartitionMut<f16, { [1, 1, HALF_D] }, MAP_SHAPE>,
+        k: &Tensor<f16, { [-1, -1, D] }>,
+        v: &Tensor<f16, { [-1, -1, D] }>,
+        k_weight: &Tensor<f16, { [D] }>,
+        inv_freq: &Tensor<f32, { [HALF_D] }>,
+        eps: f32,
+        position_start: i32,
+        range_start: i32,
+        range_len: i32,
     ) {
         let half_shape: Shape<{ [1, 1, HALF_D] }> = const_shape![1, 1, HALF_D];
         let half_shape_2d: Shape<{ [1, HALF_D] }> = const_shape![1, HALF_D];
-
-        let q_part: Partition<f16, { [1, 1, HALF_D] }> = q.partition(half_shape);
         let k_part: Partition<f16, { [1, 1, HALF_D] }> = k.partition(half_shape);
         let v_part: Partition<f16, { [1, 1, HALF_D] }> = v.partition(half_shape);
-        let q_weight_part: Partition<f16, { [HALF_D] }> =
-            q_weight.partition(const_shape![HALF_D]);
         let k_weight_part: Partition<f16, { [HALF_D] }> =
             k_weight.partition(const_shape![HALF_D]);
         let inv_part: Partition<f32, { [HALF_D] }> = inv_freq.partition(const_shape![HALF_D]);
-        // SAFETY: full-tensor mutable view construction only — the three
-        // outputs are distinct tensors and every store goes through the
-        // checked PartitionMut::store path.
-        let mut q_out_part: PartitionMut<f16, { [1, 1, HALF_D] }> =
-            unsafe { q_out.partition_full_mut(half_shape) };
-        let mut k_cache_part: PartitionMut<f16, { [1, 1, HALF_D] }> =
-            unsafe { k_cache.partition_full_mut(half_shape) };
-        let mut v_cache_part: PartitionMut<f16, { [1, 1, HALF_D] }> =
-            unsafe { v_cache.partition_full_mut(half_shape) };
 
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let seq_idx = pid.0;
-        let head_idx = pid.1;
-        let is_q: bool = head_idx < num_q_heads;
-        let local_head: i32 = if is_q {
-            head_idx
-        } else {
-            head_idx - num_q_heads
-        };
+        for index in k_cache.iter_indices_within_with(
+            [(0i32, -1i32), (range_start, range_len), (0i32, -1i32)],
+            &v_cache,
+        ) {
+            let [head_idx, pos_idx, half_idx] = index.coords();
+            let s: i32 = pos_idx - position_start;
 
-        let x_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
-            q_part.load([seq_idx, local_head, 0i32])
-        } else {
-            k_part.load([seq_idx, local_head, 0i32])
-        };
-        let x_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = if is_q {
-            q_part.load([seq_idx, local_head, 1i32])
-        } else {
-            k_part.load([seq_idx, local_head, 1i32])
-        };
-        let x_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(x_lo_f16.reshape(half_shape_2d));
-        let x_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(x_hi_f16.reshape(half_shape_2d));
+            let x_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = k_part.load([s, head_idx, 0i32]);
+            let x_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = k_part.load([s, head_idx, 1i32]);
+            let v_t: Tile<f16, { [1, 1, HALF_D] }> = v_part.load([s, head_idx, half_idx]);
+            let x_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(x_lo_f16.reshape(half_shape_2d));
+            let x_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(x_hi_f16.reshape(half_shape_2d));
 
-        let rms_vec: Tile<f32, { [1, HALF_D] }> = x_lo * x_lo + x_hi * x_hi;
-        let rms: Tile<f32, { [1] }> = reduce_sum(rms_vec, 1i32);
-        let rms: Tile<f32, { [] }> = rms.reshape(const_shape![]);
-        let n: f32 = convert_scalar(D);
-        let inv_rms: Tile<f32, { [] }> = true_div(rms, scalar_to_tile(n)) + scalar_to_tile(eps);
-        let inv_rms: Tile<f32, { [] }> = rsqrt(inv_rms, ftz::Disabled);
-        let inv_rms: f32 = tile_to_scalar(inv_rms);
-        let inv_rms: Tile<f32, { [1, HALF_D] }> = inv_rms.broadcast(half_shape_2d);
+            let rms_vec: Tile<f32, { [1, HALF_D] }> = x_lo * x_lo + x_hi * x_hi;
+            let rms: Tile<f32, { [1] }> = reduce_sum(rms_vec, 1i32);
+            let rms: Tile<f32, { [] }> = rms.reshape(const_shape![]);
+            let n: f32 = convert_scalar(D);
+            let inv_rms: Tile<f32, { [] }> =
+                true_div(rms, scalar_to_tile(n)) + scalar_to_tile(eps);
+            let inv_rms: Tile<f32, { [] }> = rsqrt(inv_rms, ftz::Disabled);
+            let inv_rms: f32 = tile_to_scalar(inv_rms);
+            let inv_rms: Tile<f32, { [1, HALF_D] }> = inv_rms.broadcast(half_shape_2d);
 
-        let w_lo_f16: Tile<f16, { [HALF_D] }> = if is_q {
-            q_weight_part.load([0i32])
-        } else {
-            k_weight_part.load([0i32])
-        };
-        let w_hi_f16: Tile<f16, { [HALF_D] }> = if is_q {
-            q_weight_part.load([1i32])
-        } else {
-            k_weight_part.load([1i32])
-        };
-        let w_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(w_lo_f16.reshape(half_shape_2d));
-        let w_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(w_hi_f16.reshape(half_shape_2d));
+            let w_lo_f16: Tile<f16, { [HALF_D] }> = k_weight_part.load([0i32]);
+            let w_hi_f16: Tile<f16, { [HALF_D] }> = k_weight_part.load([1i32]);
+            let w_lo: Tile<f32, { [1, HALF_D] }> = convert_tile(w_lo_f16.reshape(half_shape_2d));
+            let w_hi: Tile<f32, { [1, HALF_D] }> = convert_tile(w_hi_f16.reshape(half_shape_2d));
 
-        let norm_lo: Tile<f32, { [1, HALF_D] }> = x_lo * inv_rms * w_lo;
-        let norm_hi: Tile<f32, { [1, HALF_D] }> = x_hi * inv_rms * w_hi;
+            let norm_lo: Tile<f32, { [1, HALF_D] }> = x_lo * inv_rms * w_lo;
+            let norm_hi: Tile<f32, { [1, HALF_D] }> = x_hi * inv_rms * w_hi;
 
-        let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
-        let pos_i: i32 = position_start + seq_idx;
-        let pos: f32 = convert_scalar(pos_i);
-        let pos: Tile<f32, { [HALF_D] }> = pos.broadcast(const_shape![HALF_D]);
-        let theta: Tile<f32, { [1, HALF_D] }> = (pos * freq).reshape(half_shape_2d);
-        let cos_t: Tile<f32, { [1, HALF_D] }> = cos(theta);
-        let sin_t: Tile<f32, { [1, HALF_D] }> = sin(theta);
+            let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
+            let pos: f32 = convert_scalar(pos_idx);
+            let pos: Tile<f32, { [HALF_D] }> = pos.broadcast(const_shape![HALF_D]);
+            let theta: Tile<f32, { [1, HALF_D] }> = (pos * freq).reshape(half_shape_2d);
+            let cos_t: Tile<f32, { [1, HALF_D] }> = cos(theta);
+            let sin_t: Tile<f32, { [1, HALF_D] }> = sin(theta);
 
-        let y_lo: Tile<f32, { [1, HALF_D] }> = norm_lo * cos_t - norm_hi * sin_t;
-        let y_hi: Tile<f32, { [1, HALF_D] }> = norm_hi * cos_t + norm_lo * sin_t;
-        let y_lo_f16_2d: Tile<f16, { [1, HALF_D] }> = convert_tile(y_lo);
-        let y_hi_f16_2d: Tile<f16, { [1, HALF_D] }> = convert_tile(y_hi);
-        let y_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = y_lo_f16_2d.reshape(half_shape);
-        let y_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = y_hi_f16_2d.reshape(half_shape);
+            let y_lo: Tile<f32, { [1, HALF_D] }> = norm_lo * cos_t - norm_hi * sin_t;
+            let y_hi: Tile<f32, { [1, HALF_D] }> = norm_hi * cos_t + norm_lo * sin_t;
+            let y_lo_f16_2d: Tile<f16, { [1, HALF_D] }> = convert_tile(y_lo);
+            let y_hi_f16_2d: Tile<f16, { [1, HALF_D] }> = convert_tile(y_hi);
+            let y_lo_f16: Tile<f16, { [1, 1, HALF_D] }> = y_lo_f16_2d.reshape(half_shape);
+            let y_hi_f16: Tile<f16, { [1, 1, HALF_D] }> = y_hi_f16_2d.reshape(half_shape);
 
-        if is_q {
-            q_out_part.store(y_lo_f16, [seq_idx, local_head, 0i32]);
-            q_out_part.store(y_hi_f16, [seq_idx, local_head, 1i32]);
-        } else {
-            let v_lo: Tile<f16, { [1, 1, HALF_D] }> = v_part.load([seq_idx, local_head, 0i32]);
-            let v_hi: Tile<f16, { [1, 1, HALF_D] }> = v_part.load([seq_idx, local_head, 1i32]);
-            let cache_pos: i32 = position_start + seq_idx;
-            k_cache_part.store(y_lo_f16, [local_head, cache_pos, 0i32]);
-            k_cache_part.store(y_hi_f16, [local_head, cache_pos, 1i32]);
-            v_cache_part.store(v_lo, [local_head, cache_pos, 0i32]);
-            v_cache_part.store(v_hi, [local_head, cache_pos, 1i32]);
+            let y_f16: Tile<f16, { [1, 1, HALF_D] }> = if half_idx == 0i32 {
+                y_lo_f16
+            } else {
+                y_hi_f16
+            };
+            k_cache.store(y_f16, index);
+            v_cache.store(v_t, index);
         }
     }
 
@@ -3082,7 +3339,9 @@ pub use kernels::{
     gemm_persistent_f16,
     group_gemm_f16_nt_desc, kv_cache_update_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge,
-    qk_norm_mapped_f16, qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_f16,
+    k_norm_rope_v_prefill_f16, k_norm_rope_v_prefill_wide_f16, q_norm_rope_prefill_f16,
+    q_norm_rope_prefill_wide_f16,
+    qk_norm_mapped_f16, qk_norm_rope_kv_decode_f16,
     qk_rope_dynpos_mapped_f16, rms_norm_mapped_f16, rope_f16, rope_seq_dynpos_f16, rope_seq_f16,
     silu_mul_2d_f16, silu_mul_vec_f16, splitk_reduce_merge_mapped,
 };
