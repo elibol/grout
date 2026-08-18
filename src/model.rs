@@ -5,7 +5,7 @@ use crate::kernels::{
     KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_bounded_f16,
     add_rms_norm_mapped_f16, argmax_blocks_f16, argmax_reduce_blocks_to_u32, embedding_batch_f16,
     flash_attn_causal_seq_dynpos_mapped_f16, flash_attn_causal_seq_mapped_f16, fmha_causal_mapped,
-    fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt,
+    fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt_checked,
     fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
     qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_f16, qk_rope_dynpos_mapped_f16,
@@ -5632,15 +5632,15 @@ impl Qwen3Engine {
                     let num_hb_quotient = num_head_groups / swizzle;
                     let num_hb_remainder = (num_head_groups % swizzle).max(1);
                     let grid_x = (num_q_blocks * num_head_groups) as u32;
+                    // SAFETY: ctx-based execute; the kernel itself is safe.
                     unsafe {
-                        fmha_prefill_gqa_lpt(
-                            q.device_pointer().clone(),
-                            k_cache.device_pointer().clone(),
-                            v_cache.device_pointer().clone(),
-                            out.device_pointer().clone(),
+                        fmha_prefill_gqa_lpt_checked(
+                            &q,
+                            &**k_cache,
+                            &**v_cache,
+                            &out,
                             value(qk_scale),
                             value(query_group_size),
-                            value(q_len as i32),
                             value(kv_len),
                             value(*position_start as i32),
                             value(num_q_blocks as i32),
@@ -5665,6 +5665,7 @@ impl Qwen3Engine {
                         .compile_options(compile_options_with_occupancy(prefill_occupancy))
                         .execute(ctx)?;
                     }
+
                     out
                 } else if use_gqa {
                     let qgs = query_group_size as usize;

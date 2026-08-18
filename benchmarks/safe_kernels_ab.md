@@ -274,6 +274,55 @@ pending). prefill_splitk_reduce_merge and fmha_prefill_gqa_lpt_split
 are dead code; the load helpers and group_gemm_nt_desc are
 microbench-only.
 
+## Checked LPT (2026-07-30, third pass): zero engine-invoked unsafe kernels
+
+`fmha_prefill_gqa_lpt_checked` replaces the raw LPT kernel — same
+schedule decode (SCHED/swizzle/reverse walk), typed tensors, checked
+accesses; the only `unsafe` is the output's full-tensor mutable view
+construction. Counters 4/4/4: the kv-loop coordinate checks hoist to
+the loop preheaders and the four schedule-derived one-shots run once
+per CTA (no `deny` by design — grid-id and runtime-bound checks cannot
+leave the kernel).
+
+**The port fixed a live correctness bug.** The raw kernel hand-built
+its K/V views with a `kv_len * D` head stride against the persistent
+cache's real `max_seq * D` stride, reading the wrong rows for every
+kv head >= 1 whenever kv_len != max_seq — which is the canonical sweep
+configuration (device-verified: LPT-on text diverged from the mapped
+reference at pp=2048/max_seq=4096; unit test pinned 50% of output
+elements wrong at kv_heads=2). The checked kernel takes strides from
+real tensor metadata, making the bug inexpressible; its output matches
+the mapped-prefill reference exactly, and a stride-invariance
+regression test (padded == contiguous cache) is in tests/kernels.rs.
+The 5090 sweep numbers at pp >= 2048 (LPT enabled by the sm120
+profile) were computed with the buggy kernel: throughput valid
+(identical op schedule), outputs numerically wrong; the published
+B200 safe bundle is unaffected (it disabled LPT).
+
+Paired attention us/call (sync-ops, deployed shape BM=16/BN=64/
+SWIZZLE=8/SCHED=1; mapped at its own BM=64/BN=32 optimum):
+
+| pp | raw LPT | checked LPT | mapped |
+|---|---|---|---|
+| 2048 | 175.6/183.9/186.1 | 185.4/172.8/179.6 | 209.8/210.1 |
+| 8192 | 2473.0/2591.9/2481.5 | 2473.5/2499.8/2476.8 | 2746.3/2728.0/2696.4 |
+
+Checked == raw (checked marginally faster on means at both sizes —
+the guide's checked-beats-unsafe result reproduces), and LPT remains
+~9-15% faster than the mapped kernel at long prefill, so the LPT path
+stays — now safe and correct. Register audit: indirect (perf parity
+across paired rounds rules out a spill/occupancy regression; rerun the
+runbook 2b cubin audit when JIT artifacts are available).
+
+**Census: 26 safe / 0 unsafe engine-invoked kernels** (+1 opt-in
+unsafe in flash_decode.rs). Remaining `unsafe fn`s in kernels.rs are
+non-engine: two load helpers and group_gemm_nt_desc (microbench-only),
+fmha_prefill_gqa_lpt_split and prefill_splitk_reduce_merge (dead code,
+deletion candidates). B200 recommendation: enable
+GROUT_FMHA_PREFILL_GQA_LPT with the checked kernel there (sm_100
+auto-enables LPT at q_len >= 2048; the old auto-path ran the buggy raw
+kernel) and rerun the runbook 2b audit at the retuned shapes.
+
 ## Tracked follow-ups
 
 - tileiras For-region register pressure (SASS/cubin artifacts saved on

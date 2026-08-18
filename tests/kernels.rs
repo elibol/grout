@@ -467,3 +467,105 @@ fn qk_norm_rope_kv_prefill_safe_matches_reference() -> Result<()> {
     assert_eq!(bad, 0, "{bad} mismatches vs host reference");
     Ok(())
 }
+
+/// LPT stride invariance: the checked kernel's output on a padded KV cache
+/// (rows > kv_len — the engine's real layout) must equal its output on a
+/// contiguous cache. The deleted raw kernel failed exactly this (kv_len*D
+/// head stride against the cache's max_seq*D — 50% of elements wrong at
+/// kv_heads=2), which is the bug this test pins closed.
+#[test]
+fn fmha_prefill_lpt_checked_matches_and_fixes_strides() -> Result<()> {
+    match Device::device_count() {
+        Ok(count) if count > 0 => {}
+        _ => return Ok(()),
+    }
+    use grout::kernels::fmha_prefill_gqa_lpt_checked;
+    const D: usize = 128;
+    const BM: usize = 16;
+    const BN: usize = 64;
+    const GROUP: usize = 4;
+    const M_EFF: usize = BM * GROUP;
+    const QLEN: usize = 64;
+    const QHEADS: usize = 8;
+    const KVHEADS: usize = 2;
+    const KVLEN: usize = 64;
+    const PAD: usize = 128;
+    let qgs = (QHEADS / KVHEADS) as i32; // 4
+    let num_q_blocks = (QLEN / BM) as i32; // 4
+    let num_head_groups = (QHEADS / GROUP) as i32; // 2
+    let grid_x = (num_q_blocks * num_head_groups) as u32;
+    let generics: Vec<String> = vec![
+        BM.to_string(), BN.to_string(), D.to_string(), GROUP.to_string(),
+        M_EFF.to_string(), "1".into(), "1".into(), "2".into(), "1".into(), "0".into(),
+    ];
+
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
+    let gen_f16 = |seed: u32, n: usize| -> Arc<Vec<f16>> {
+        let mut v = Vec::with_capacity(n);
+        let mut x = seed;
+        for _ in 0..n {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            v.push(f16::from_f32(((x >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0));
+        }
+        Arc::new(v)
+    };
+    let q_h = gen_f16(21, QLEN * QHEADS * D);
+    let k_h = gen_f16(22, KVHEADS * KVLEN * D);
+    let v_h = gen_f16(23, KVHEADS * KVLEN * D);
+    // Padded copies: same rows 0..KVLEN, garbage-free zeros beyond.
+    let pad_copy = |src: &Arc<Vec<f16>>| -> Arc<Vec<f16>> {
+        let mut p = vec![f16::from_f32(0.0); KVHEADS * PAD * D];
+        for h in 0..KVHEADS {
+            for r in 0..KVLEN {
+                for d0 in 0..D {
+                    p[h * PAD * D + r * D + d0] = src[h * KVLEN * D + r * D + d0];
+                }
+            }
+        }
+        Arc::new(p)
+    };
+    let kp_h = pad_copy(&k_h);
+    let vp_h = pad_copy(&v_h);
+
+    let q = Arc::new(api::copy_host_vec_to_device(&q_h).reshape(&[QLEN, QHEADS, D]).sync_on(&stream)?);
+    let k_c = Arc::new(api::copy_host_vec_to_device(&k_h).reshape(&[KVHEADS, KVLEN, D]).sync_on(&stream)?);
+    let v_c = Arc::new(api::copy_host_vec_to_device(&v_h).reshape(&[KVHEADS, KVLEN, D]).sync_on(&stream)?);
+    let k_p = Arc::new(api::copy_host_vec_to_device(&kp_h).reshape(&[KVHEADS, PAD, D]).sync_on(&stream)?);
+    let v_p = Arc::new(api::copy_host_vec_to_device(&vp_h).reshape(&[KVHEADS, PAD, D]).sync_on(&stream)?);
+    let scale = 1.0f32 / (D as f32).sqrt();
+
+    // 1) checked on the contiguous cache = ground truth
+    let out_raw = api::zeros::<f16>(&[QLEN, QHEADS, D]).sync_on(&stream)?;
+    fmha_prefill_gqa_lpt_checked(
+        &q, &k_c, &v_c, &out_raw,
+        value(scale), value(qgs), value(KVLEN as i32), value(0i32),
+        value(num_q_blocks), value(num_head_groups),
+        value(1i32), value(2i32), value(1i32),
+    )
+    .generics(generics.clone()).grid((grid_x, 1, 1)).sync_on(&stream)?;
+
+    // 2) checked on the PADDED cache (engine layout) — must equal truth
+    let out_chk = api::zeros::<f16>(&[QLEN, QHEADS, D]).sync_on(&stream)?;
+    fmha_prefill_gqa_lpt_checked(
+        &q, &k_p, &v_p, &out_chk,
+        value(scale), value(qgs), value(KVLEN as i32), value(0i32),
+        value(num_q_blocks), value(num_head_groups),
+        value(1i32), value(2i32), value(1i32),
+    )
+    .generics(generics.clone()).grid((grid_x, 1, 1)).sync_on(&stream)?;
+
+    let truth = out_raw.to_host_vec().sync_on(&stream)?;
+    let chk = out_chk.to_host_vec().sync_on(&stream)?;
+    let mut chk_bad = 0usize;
+    for i in 0..truth.len() {
+        if truth[i].to_f32() != chk[i].to_f32() {
+            if chk_bad < 4 {
+                eprintln!("checked mismatch @{i}: truth={} chk={}", truth[i].to_f32(), chk[i].to_f32());
+            }
+            chk_bad += 1;
+        }
+    }
+    assert_eq!(chk_bad, 0, "checked LPT diverges from contiguous truth: {chk_bad}");
+    Ok(())
+}
