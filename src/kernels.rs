@@ -61,30 +61,37 @@ pub const TILE_KERNEL_KINDS: [KernelKind; 17] = [
 pub mod kernels {
     use cutile::core::*;
 
-    #[cutile::entry(print_ir=false,
-                       unchecked_accesses=true,
-                       optimization_hints = (
-                         sm_120 = (num_cta_in_cga=2, max_divisibility=16,),
-                       ))]
-    fn gemm_f16<const BM: i32, const BN: i32, const BK: i32, const K: i32>(
-        z: &mut Tensor<f16, { [BM, BN] }>,
-        x: &Tensor<f16, { [-1, K] }>,
-        y: &Tensor<f16, { [K, -1] }>,
+    #[cutile::entry(
+        optimization_hints = (
+            sm_100 = (num_cta_in_cga = 2,),
+            sm_120 = (num_cta_in_cga = 2,),
+        ),
+        deny_in_kernel_checks = true,
+    )]
+    fn gemm_persistent_f16<
+        const BM: i32,
+        const BN: i32,
+        const BK: i32,
+        const MAP_SHAPE: [i32; 2],
+    >(
+        mut z: MappedPartitionMut<f16, { [BM, BN] }, MAP_SHAPE>,
+        x: &Tensor<f16, { [-1, -1] }>,
+        y: &Tensor<f16, { [-1, -1] }>,
     ) {
         let part_x = x.partition(const_shape![BM, BK]);
         let part_y = y.partition(const_shape![BK, BN]);
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let mut tile_z: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
-        for i in 0i32..(K / BK) {
-            let tile_x: Tile<f16, { [BM, BK] }> = part_x.load([pid.0, i]);
-            let tile_y: Tile<f16, { [BK, BN] }> = part_y.load([i, pid.1]);
-            let tile_x: Tile<f32, { [BM, BK] }> = convert_tile(tile_x);
-            let tile_y: Tile<f32, { [BK, BN] }> = convert_tile(tile_y);
-            tile_z = mma(tile_x, tile_y, tile_z);
-            continue;
+
+        for out_idx in z.iter_indices() {
+            let (bid_m, bid_n) = out_idx.components();
+            let mut tile_z: Tile<f16, { [BM, BN] }> =
+                constant(f16::ZERO, const_shape![BM, BN]);
+            for k_tile in 0i32..num_tiles(&part_x, 1) {
+                let tile_x = part_x.load([bid_m, k_tile]);
+                let tile_y = part_y.load([k_tile, bid_n]);
+                tile_z = mma(tile_x, tile_y, tile_z);
+            }
+            z.store(tile_z, out_idx);
         }
-        let tile_z: Tile<f16, { [BM, BN] }> = convert_tile(tile_z);
-        z.store(tile_z);
     }
 
     unsafe fn load_f16_ptr(
@@ -3071,7 +3078,8 @@ pub use kernels::{
      flash_attn_causal_seq_dynpos_mapped_f16,
     flash_attn_causal_seq_mapped_f16,  fmha_causal_mapped,
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt_checked,
-    fmha_prefill_gqa_lpt_split, fmha_prefill_gqa_mapped, gather_row_f16, gemm_f16,
+    fmha_prefill_gqa_lpt_split, fmha_prefill_gqa_mapped, gather_row_f16,
+    gemm_persistent_f16,
     group_gemm_f16_nt_desc, kv_cache_update_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge,
     qk_norm_mapped_f16, qk_norm_rope_kv_decode_f16, qk_norm_rope_kv_prefill_f16,

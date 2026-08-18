@@ -307,3 +307,118 @@ target. Occupancy 1 -> 2 on both fused sm_100 entries is adopted
 handoff; the grid-specialization variant (172.6 ms) is a candidate
 follow-up if the handoff doesn't retire the spills. Remaining gap vs
 July (178 vs ~122 ms at pp=2048) is still unattributed.
+
+## Continuation Phase B: persistent GEMM evaluation
+
+Phase B parent revisions were grout
+`80d65686142a73a802583f6b452014179844c0d9` and cutile-rs
+`61012a71ca6837f0af02d7516578a99258724a11`. GPU clocks were left at their
+defaults. The engine's cuBLAS call sites were not changed.
+
+The unused in-tree `gemm_f16` test kernel was replaced by
+`gemm_persistent_f16`, following the derived-facts form in the cutile-rs
+persistent-GEMM example: mapped mutable output, persistent `iter_indices`, no
+bounds annotations, `deny_in_kernel_checks=true`, and two CTAs per CGA. A
+separate benchmark binary compares this kernel with the same cuBLAS wrapper
+used by the engine.
+
+### Method
+
+The sweep covered the four Qwen3-32B projection shapes at
+`M={1,512,2048,8192}`, with `BM={16,32,64,128}`,
+`BN={64,128,256,512}`, and `BK={32,64,128}`: 768 candidates in total. For
+`M=1`, the cuTile input/output M axis was padded to BM and masked by tensor
+bounds; cuBLAS retained logical M=1. Each candidate was JIT-compiled and
+launch-tested, correctness-gated against cuBLAS at representative first/last
+elements with relative tolerance `1e-2`, and timed with alternating-order CUDA
+event samples. All 768 candidates passed. The winner table below comes from a
+fresh nine-sample paired rerun of each broad-sweep winner.
+
+`ratio` is persistent/cuBLAS, so values below 1 favor the persistent kernel.
+
+| M | projection (`N x K`) | best `BM x BN x BK` | cuBLAS (us) | persistent (us) | ratio |
+|---:|---|---:|---:|---:|---:|
+| 1 | qkv (`10240 x 5120`) | `64 x 256 x 64` | 17.220 | 19.393 | 1.1262 |
+| 1 | o (`5120 x 8192`) | `128 x 128 x 128` | 13.822 | 18.822 | 1.3617 |
+| 1 | gate_up (`51200 x 5120`) | `64 x 256 x 64` | 85.708 | 81.329 | **0.9489** |
+| 1 | down (`5120 x 25600`) | `64 x 128 x 128` | 46.467 | 51.655 | 1.1116 |
+| 512 | qkv | `128 x 128 x 128` | 38.230 | 52.544 | 1.3744 |
+| 512 | o | `128 x 128 x 128` | 28.266 | 49.667 | 1.7572 |
+| 512 | gate_up | `128 x 512 x 128` | 150.122 | 219.261 | 1.4606 |
+| 512 | down | `128 x 128 x 128` | 103.283 | 158.650 | 1.5361 |
+| 2048 | qkv | `128 x 128 x 128` | 124.896 | 172.864 | 1.3841 |
+| 2048 | o | `128 x 128 x 128` | 91.462 | 142.438 | 1.5573 |
+| 2048 | gate_up | `128 x 512 x 128` | 529.549 | 758.522 | 1.4324 |
+| 2048 | down | `128 x 128 x 128` | 314.522 | 474.432 | 1.5084 |
+| 8192 | qkv | `128 x 512 x 128` | 433.781 | 619.456 | 1.4280 |
+| 8192 | o | `128 x 512 x 128` | 347.840 | 498.507 | 1.4331 |
+| 8192 | gate_up | `128 x 256 x 128` | 2067.200 | 3219.424 | 1.5574 |
+| 8192 | down | `128 x 512 x 128` | 1196.235 | 1518.571 | 1.2695 |
+
+The decode/GEMV result is mixed rather than an engine-wide win. Persistent
+gate-up is 5.11% faster, but qkv, o, and down are 12.62%, 36.17%, and 11.16%
+slower. At M=512 the persistent winners are 37.44-75.72% slower; at M=2048
+they are 38.41-55.73% slower; and at M=8192 they are 26.95-55.74% slower.
+The verdict is therefore no engine integration in the GEMV, small-M, or
+large-M regimes from these measurements.
+
+### Winner resource audit
+
+All distinct winning specializations compile with `REG 255`, `STACK 0`, and
+zero `LDL/STL`. Their static shared-memory requirements are:
+
+| tile | shared memory (bytes) |
+|---:|---:|
+| `64 x 256 x 64` | 206140 |
+| `64 x 128 x 128` | 189836 |
+| `128 x 128 x 128` | 165172 |
+| `128 x 256 x 128` | 173300 |
+| `128 x 512 x 128` | 230636 |
+
+The derived-facts kernel compiled with the deny gate for every sweep cell and
+the winners do not spill. Phase B therefore did not produce a new cutile-rs
+check-placement or spill finding.
+
+### Fusion opportunity sizing
+
+The four measured M=1 cuBLAS projections move 956.3 MB of weights in
+160.2 us, an aggregate effective bandwidth of about 5.97 TB/s. The estimates
+below divide eliminated activation traffic by that measured bandwidth; they
+are bandwidth floors, not end-to-end speedup predictions.
+
+| fusion boundary | traffic avoided per token per layer | time at 5.97 TB/s | persistent-GEMM gate |
+|---|---:|---:|---|
+| qkv GEMM -> QK norm/RoPE/KV | 40,960 bytes | 0.0069 us | closed: qkv GEMM is 12.6% slower at M=1 and 37-43% slower at prefill M |
+| gate_up GEMM -> silu_mul -> down GEMM, two `[M,2*inter]` roundtrips | 409,600 bytes | 0.0686 us | closed: down GEMM is 11.2% slower at M=1 and both GEMMs lose at prefill M |
+| lm_head GEMV -> argmax | 607,744 bytes | 0.1017 us | existing fused implementation measured separately below |
+
+Across all 64 layers, the first two decode figures correspond to 2.62 MB and
+26.21 MB per token, or bandwidth floors of 0.44 us and 4.39 us. At M=8192,
+the per-layer figures are 335.5 MB/56.2 us for qkv and 3.36 GB/561.6 us for
+the requested gate-up accounting. The current decode graph also materializes
+gate/up slices and the SiLU output; a complete gate-up-to-down fusion would
+remove 512,000 bytes per token per layer in that graph. These opportunities
+remain hypothetical because the corresponding persistent GEMMs do not meet
+the within-10%-of-cuBLAS gate.
+
+The existing fused LM-head/argmax path was checked rather than assumed to be
+an existence-proof win. Three paired rounds used separate/fused,
+fused/separate, separate/fused order, with one warmup and three measured
+128-token decodes per process.
+
+| path | round means (ms) | overall mean (ms) | delta |
+|---|---:|---:|---:|
+| separate cuBLAS LM-head + argmax | 1708.574 / 1708.671 / 1708.654 | 1708.633 | reference |
+| fused LM-head/argmax | 1783.547 / 1783.638 / 1783.560 | 1783.582 | +4.39% |
+
+On this B200/Qwen3-32B configuration the existing fused path is an
+implementation precedent, not a performance win. It structurally removes the
+logits roundtrip, but its kernel implementation more than offsets the small
+bandwidth floor measured here.
+
+### Integration policy
+
+No engine GEMM path was modified. Any future per-site persistent-GEMM dispatch
+must use `GROUT_CUTILE_GEMM` through `env_bool_or`, with default `false`
+retaining cuBLAS. The in-tree persistent kernel and microbenchmark are the only
+Phase B source changes.
