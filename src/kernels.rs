@@ -2811,7 +2811,7 @@ pub mod kernels {
     /// and all loads/stores are checked.
     #[cutile::entry(print_ir=false,
                        optimization_hints = (
-                         sm_100 = (occupancy=1, max_divisibility=16,),
+                         sm_100 = (occupancy=2, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
     fn qk_norm_rope_kv_prefill_f16<
@@ -2942,7 +2942,7 @@ pub mod kernels {
     /// (`partition_full_mut`); all loads and stores are checked.
     #[cutile::entry(print_ir=false,
                        optimization_hints = (
-                         sm_100 = (occupancy=1, max_divisibility=16,),
+                         sm_100 = (occupancy=2, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
     fn qk_norm_rope_kv_decode_f16<

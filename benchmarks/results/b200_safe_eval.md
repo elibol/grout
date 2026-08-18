@@ -297,3 +297,13 @@ shape-specific mistuning, not an all-shape sm_100 code-generation failure.
 The fused checked prefill and decode kernels remain the cutile-rs/codegen
 handoff findings. Their diagnostic cubins and the mapped `BM=128/BN=128`
 cubin are retained in the ignored raw-result bundle.
+
+### Adopted mitigation (post-ladder)
+
+The ladder's stack gate (`STACK < 100`) was a proxy; latency was the
+target. Occupancy 1 -> 2 on both fused sm_100 entries is adopted
+(pp=2048 prefill 230.0 -> 178.0 ms, faster than the unchecked twin's
+207.8). Stack stays 416 — that remains the open cutile-rs codegen
+handoff; the grid-specialization variant (172.6 ms) is a candidate
+follow-up if the handoff doesn't retire the spills. Remaining gap vs
+July (178 vs ~122 ms at pp=2048) is still unattributed.
