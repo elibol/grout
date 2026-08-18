@@ -2819,8 +2819,11 @@ pub mod kernels {
     /// iota. Straight-line, no branching; the handful of grid-id access
     /// checks run once per CTA, amortized over BM rows. Covers the
     /// BM-aligned row prefix; q_norm_rope_prefill_f16 takes the remainder.
+    /// With tile-block-id discharge against the launch grid (cutile-rs
+    /// 3948cbc), every check leaves the kernel — enforced by deny.
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
+                       deny_in_kernel_checks=true,
                        optimization_hints = (
                          sm_100 = (occupancy=2, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),

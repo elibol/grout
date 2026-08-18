@@ -348,6 +348,17 @@ validation + source-row lattice checks in kernel, once per CTA); wide
 kernels carry 8/16 one-shot grid-id checks, amortized over BM rows.
 sm_100 validation pending (occupancy=2 hints inherited).
 
+## Tile-block-id discharge adopted (2026-08-18, cutile-rs 3948cbc)
+
+With block-id accesses now discharged against the launch grid,
+`q_norm_rope_prefill_wide_f16` compiles with every check out of the
+kernel (counters 15/0/0) and carries `deny_in_kernel_checks = true`.
+`k_norm_rope_v_prefill_wide_f16` drops 16 -> 4 in-place checks (the
+remaining 4 are the `position_start`-derived cache-block coordinate, a
+lattice case, once per CTA). Per-row sub-range kernels unchanged by
+design. 5090 sanity at the new compiler: pp=2048 ~62 ms / pp=8192
+~392 ms, text and decode unchanged, 6 GPU tests pass.
+
 ## Engine GEMM policy
 
 Any cuTile GEMM wired into engine paths must sit behind
