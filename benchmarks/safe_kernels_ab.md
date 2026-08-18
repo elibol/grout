@@ -332,6 +332,14 @@ GROUT_FMHA_PREFILL_GQA_LPT with the checked kernel there (sm_100
 auto-enables LPT at q_len >= 2048; the old auto-path ran the buggy raw
 kernel) and rerun the runbook 2b audit at the retuned shapes.
 
+## Engine GEMM policy
+
+Any cuTile GEMM wired into engine paths must sit behind
+`GROUT_CUTILE_GEMM` (`env_bool_or`, default **false** = cuBLAS), per call
+site, like the other kernel toggles — never an unconditional replacement.
+cuBLAS remains the default until a paired best-vs-best A/B on the target
+arch says otherwise per shape regime (GEMV M=1 especially).
+
 ## Tracked follow-ups
 
 - tileiras For-region register pressure (SASS/cubin artifacts saved on
