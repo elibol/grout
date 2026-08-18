@@ -181,3 +181,33 @@ the sm_120 Qwen3-4B reference (9-15%), but that is not a pure architecture
 comparison: Qwen3-32B has a different GQA ratio and the arms use their own
 kernel-specific tiles. The sm_100 spill cubins, especially the fused prefill
 QK/RoPE/KV kernel, remain compiler-handoff material.
+
+## P3: Partial decode tile sweep
+
+The optional Qwen3-32B sweep covered the complete `BN x NKS` grid at tg=128
+and tg=512, with pp=18, one warmup, and three measured reps per cell. The
+tg=2048 grid was skipped because its 16 long-decode cells would exceed the
+remaining allocation.
+
+Median total decode ms at tg=128 (lower is better):
+
+| BN / NKS | 2 | 4 | 8 | 16 |
+|---:|---:|---:|---:|---:|
+| 16 | 1702.56 | 1689.61 | 1684.43 | 1688.08 |
+| 32 | 1692.00 | 1682.99 | 1687.89 | 1681.75 |
+| 64 | 1677.07 | 1674.68 | **1673.06** | 1675.49 |
+| 128 | 1680.01 | 1678.21 | 1676.86 | 1678.95 |
+
+Median total decode ms at tg=512:
+
+| BN / NKS | 2 | 4 | 8 | 16 |
+|---:|---:|---:|---:|---:|
+| 16 | 7070.82 | 6912.98 | 6839.92 | 6812.57 |
+| 32 | 6947.74 | 6839.69 | 6788.77 | 6788.99 |
+| 64 | 6779.16 | 6750.68 | **6733.29** | 6744.74 |
+| 128 | 6777.19 | 6756.74 | 6750.87 | 6758.19 |
+
+The current tg=512 wrapper setting (`BN=64/NKS=8`) is the measured winner.
+At tg=128, `BN=64/NKS=8` is 0.59% faster than the current
+`BN=32/NKS=4` cell; that unpaired sub-percent margin is not sufficient to
+change the wrapper. No source or wrapper update was made.
