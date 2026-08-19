@@ -2811,16 +2811,15 @@ pub mod kernels {
     }
 
 
-    /// Bulk Q half of the prefill fused norm+RoPE (split from the former
-    /// single qk_norm_rope_kv_prefill kernel, whose is_q branching cost
-    /// REG 255 / STACK 416 on sm_100, and whose [1, 1, HALF_D] per-row
-    /// tiles ran ~6x over the bandwidth floor): wide [BM, 1, HALF_D] tiles
-    /// on a (seq_len / BM, num_q_heads) grid, per-row RoPE positions via
-    /// iota. Straight-line, no branching; the handful of grid-id access
-    /// checks run once per CTA, amortized over BM rows. Covers the
-    /// BM-aligned row prefix; q_norm_rope_prefill_f16 takes the remainder.
-    /// With tile-block-id discharge against the launch grid (cutile-rs
-    /// 3948cbc), every check leaves the kernel — enforced by deny.
+    /// Bulk Q half of the prefill fused norm+RoPE, zero unsafe: the host
+    /// binds q_out as per-CTA [BM, 1, D] blocks (&mut Tensor param with a
+    /// prefix-coverage partition, so the grid may cover only the
+    /// BM-aligned row prefix; cutile-rs e90f9b8), and the kernel safely
+    /// partition_mut's its own exclusive block into half tiles with
+    /// literal store coordinates. Wide [BM, 1, HALF_D] tiles amortize
+    /// per-row RoPE positions via iota; no is_q branching.
+    /// q_norm_rope_prefill_f16 takes the remainder rows. Builds under
+    /// deny_in_kernel_checks.
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=false,
                        deny_in_kernel_checks=true,
@@ -2828,7 +2827,7 @@ pub mod kernels {
                          sm_100 = (occupancy=2, max_divisibility=16,),
                          sm_120 = (occupancy=1, max_divisibility=16,),
                        ))]
-    fn q_norm_rope_prefill_wide_exact_f16<
+    fn q_norm_rope_prefill_wide_f16<
         const D: i32,
         const HALF_D: i32,
         const BM: i32,
@@ -2900,99 +2899,6 @@ pub mod kernels {
 
         out_part.store(y_lo_f16, [0i32, 0i32, 0i32]);
         out_part.store(y_hi_f16, [0i32, 0i32, 1i32]);
-    }
-
-    /// Bulk Q half of the prefill fused norm+RoPE (split from the former
-    /// single qk_norm_rope_kv_prefill kernel, whose is_q branching cost
-    /// REG 255 / STACK 416 on sm_100, and whose [1, 1, HALF_D] per-row
-    /// tiles ran ~6x over the bandwidth floor): wide [BM, 1, HALF_D] tiles
-    /// on a (seq_len / BM, num_q_heads) grid, per-row RoPE positions via
-    /// iota. Straight-line, no branching; the handful of grid-id access
-    /// checks run once per CTA, amortized over BM rows. Covers the
-    /// BM-aligned row prefix; q_norm_rope_prefill_f16 takes the remainder.
-    /// With tile-block-id discharge against the launch grid (cutile-rs
-    /// 3948cbc), every check leaves the kernel — enforced by deny.
-    #[cutile::entry(print_ir=false,
-                       unchecked_accesses=false,
-                       deny_in_kernel_checks=true,
-                       optimization_hints = (
-                         sm_100 = (occupancy=2, max_divisibility=16,),
-                         sm_120 = (occupancy=1, max_divisibility=16,),
-                       ))]
-    fn q_norm_rope_prefill_wide_f16<
-        const D: i32,
-        const HALF_D: i32,
-        const BM: i32,
-    >(
-        q: &Tensor<f16, { [-1, -1, D] }>,
-        q_weight: &Tensor<f16, { [D] }>,
-        inv_freq: &Tensor<f32, { [HALF_D] }>,
-        q_out: &Tensor<f16, { [-1, -1, D] }>,
-        eps: f32,
-        position_start: i32,
-    ) {
-        let tile_shape: Shape<{ [BM, 1, HALF_D] }> = const_shape![BM, 1, HALF_D];
-        let shape_2d: Shape<{ [BM, HALF_D] }> = const_shape![BM, HALF_D];
-        let q_part: Partition<f16, { [BM, 1, HALF_D] }> = q.partition(tile_shape);
-        let w_part: Partition<f16, { [HALF_D] }> = q_weight.partition(const_shape![HALF_D]);
-        let inv_part: Partition<f32, { [HALF_D] }> = inv_freq.partition(const_shape![HALF_D]);
-        // SAFETY: full-tensor mutable view construction only — every store
-        // goes through the checked PartitionMut::store path.
-        let mut out_part: PartitionMut<f16, { [BM, 1, HALF_D] }> =
-            unsafe { q_out.partition_full_mut(tile_shape) };
-
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let m_blk = pid.0;
-        let head_idx = pid.1;
-
-        let x_lo_f16: Tile<f16, { [BM, 1, HALF_D] }> = q_part.load([m_blk, head_idx, 0i32]);
-        let x_hi_f16: Tile<f16, { [BM, 1, HALF_D] }> = q_part.load([m_blk, head_idx, 1i32]);
-        let x_lo: Tile<f32, { [BM, HALF_D] }> = convert_tile(x_lo_f16.reshape(shape_2d));
-        let x_hi: Tile<f32, { [BM, HALF_D] }> = convert_tile(x_hi_f16.reshape(shape_2d));
-
-        let rms_vec: Tile<f32, { [BM, HALF_D] }> = x_lo * x_lo + x_hi * x_hi;
-        let rms: Tile<f32, { [BM] }> = reduce_sum(rms_vec, 1i32);
-        let rms: Tile<f32, { [BM, 1] }> = rms.reshape(const_shape![BM, 1]);
-        let n: f32 = convert_scalar(D);
-        let n_t: Tile<f32, { [BM, 1] }> = n.broadcast(const_shape![BM, 1]);
-        let eps_t: Tile<f32, { [BM, 1] }> = eps.broadcast(const_shape![BM, 1]);
-        let inv_rms: Tile<f32, { [BM, 1] }> = rsqrt(true_div(rms, n_t) + eps_t, ftz::Disabled);
-        let inv_rms: Tile<f32, { [BM, HALF_D] }> = inv_rms.broadcast(shape_2d);
-
-        let w_lo_f16: Tile<f16, { [HALF_D] }> = w_part.load([0i32]);
-        let w_hi_f16: Tile<f16, { [HALF_D] }> = w_part.load([1i32]);
-        let w_lo_f32: Tile<f32, { [HALF_D] }> = convert_tile(w_lo_f16);
-        let w_hi_f32: Tile<f32, { [HALF_D] }> = convert_tile(w_hi_f16);
-        let w_lo: Tile<f32, { [BM, HALF_D] }> =
-            w_lo_f32.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
-        let w_hi: Tile<f32, { [BM, HALF_D] }> =
-            w_hi_f32.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
-
-        let norm_lo: Tile<f32, { [BM, HALF_D] }> = x_lo * inv_rms * w_lo;
-        let norm_hi: Tile<f32, { [BM, HALF_D] }> = x_hi * inv_rms * w_hi;
-
-        let freq: Tile<f32, { [HALF_D] }> = inv_part.load([0i32]);
-        let freq2: Tile<f32, { [BM, HALF_D] }> =
-            freq.reshape(const_shape![1, HALF_D]).broadcast(shape_2d);
-        let pos_base: i32 = position_start + m_blk * BM;
-        let pos_i: Tile<i32, { [BM] }> =
-            pos_base.broadcast(const_shape![BM]) + iota(const_shape![BM]);
-        let pos_f: Tile<f32, { [BM] }> = convert_tile(pos_i);
-        let pos2: Tile<f32, { [BM, HALF_D] }> =
-            pos_f.reshape(const_shape![BM, 1]).broadcast(shape_2d);
-        let theta: Tile<f32, { [BM, HALF_D] }> = pos2 * freq2;
-        let cos_t: Tile<f32, { [BM, HALF_D] }> = cos(theta);
-        let sin_t: Tile<f32, { [BM, HALF_D] }> = sin(theta);
-
-        let y_lo: Tile<f32, { [BM, HALF_D] }> = norm_lo * cos_t - norm_hi * sin_t;
-        let y_hi: Tile<f32, { [BM, HALF_D] }> = norm_hi * cos_t + norm_lo * sin_t;
-        let y_lo_f16_2d: Tile<f16, { [BM, HALF_D] }> = convert_tile(y_lo);
-        let y_hi_f16_2d: Tile<f16, { [BM, HALF_D] }> = convert_tile(y_hi);
-        let y_lo_f16: Tile<f16, { [BM, 1, HALF_D] }> = y_lo_f16_2d.reshape(tile_shape);
-        let y_hi_f16: Tile<f16, { [BM, 1, HALF_D] }> = y_hi_f16_2d.reshape(tile_shape);
-
-        out_part.store(y_lo_f16, [m_blk, head_idx, 0i32]);
-        out_part.store(y_hi_f16, [m_blk, head_idx, 1i32]);
     }
 
     /// Row-subrange Q half of the prefill fused norm+RoPE: per-row
@@ -3434,7 +3340,7 @@ pub use kernels::{
     group_gemm_f16_nt_desc, kv_cache_update_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge,
     k_norm_rope_v_prefill_f16, k_norm_rope_v_prefill_wide_f16, q_norm_rope_prefill_f16,
-    q_norm_rope_prefill_wide_exact_f16, q_norm_rope_prefill_wide_f16,
+    q_norm_rope_prefill_wide_f16,
     qk_norm_mapped_f16, qk_norm_rope_kv_decode_f16,
     qk_rope_dynpos_mapped_f16, rms_norm_mapped_f16, rope_f16, rope_seq_dynpos_f16, rope_seq_f16,
     silu_mul_2d_f16, silu_mul_vec_f16, splitk_reduce_merge_mapped,

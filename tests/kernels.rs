@@ -393,10 +393,20 @@ fn qk_norm_rope_kv_prefill_safe_matches_reference() -> Result<()> {
     const BM: usize = 2;
     const BULK: usize = SEQ - SEQ % BM;
     const TAIL: usize = SEQ - BULK;
-    q_norm_rope_prefill_wide_f16(&q, &qw, &inv, &q_out, 1e-6f32, POS0 as i32)
-        .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
-        .grid(((BULK / BM) as u32, NQ as u32, 1u32))
-        .sync_on(&stream)?;
+    // Prefix coverage: grid covers only the BULK rows of q_out's 3-block
+    // grid — exercises the partial-coverage &mut binding (cutile-rs
+    // e90f9b8).
+    q_norm_rope_prefill_wide_f16(
+        &q,
+        &qw,
+        &inv,
+        (&mut q_out).partition([BM, 1, D]).prefix(),
+        1e-6f32,
+        POS0 as i32,
+    )
+    .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
+    .grid(((BULK / BM) as u32, NQ as u32, 1u32))
+    .sync_on(&stream)?;
     q_norm_rope_prefill_f16(
         (&mut q_out)
             .partition([1, 1, HALF_D])
@@ -513,16 +523,17 @@ fn qk_norm_rope_kv_prefill_safe_matches_reference() -> Result<()> {
     Ok(())
 }
 
-/// Exact-coverage safe wide Q kernel (coarse &mut blocks + in-kernel
-/// partition_mut) must produce bit-identical output to the general wide
-/// kernel on the same inputs when the grid covers q_out exactly.
+/// Prefix-coverage semantics for the safe wide Q kernel: launching over
+/// only the first 2 of 3 row-blocks must write exactly those rows and
+/// leave the uncovered block untouched; a full-coverage launch over the
+/// same inputs must agree bitwise on the covered prefix.
 #[test]
-fn q_norm_rope_prefill_wide_exact_matches_general() -> Result<()> {
+fn q_norm_rope_prefill_wide_prefix_coverage_semantics() -> Result<()> {
     match Device::device_count() {
         Ok(count) if count > 0 => {}
         _ => return Ok(()),
     }
-    use grout::kernels::{q_norm_rope_prefill_wide_exact_f16, q_norm_rope_prefill_wide_f16};
+    use grout::kernels::q_norm_rope_prefill_wide_f16;
     const D: usize = 128;
     const HALF_D: usize = 64;
     const NQ: usize = 4;
@@ -551,29 +562,44 @@ fn q_norm_rope_prefill_wide_exact_matches_general() -> Result<()> {
     let q = Arc::new(api::copy_host_vec_to_device(&q_h).reshape(&[SEQ, NQ, D]).sync_on(&stream)?);
     let qw = Arc::new(api::copy_host_vec_to_device(&qw_h).reshape(&[D]).sync_on(&stream)?);
     let inv = Arc::new(api::copy_host_vec_to_device(&inv_host).reshape(&[HALF_D]).sync_on(&stream)?);
-    let out_a = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
-    let mut out_b = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
+    let mut out_full = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
+    let mut out_pre = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
 
-    q_norm_rope_prefill_wide_f16(&q, &qw, &inv, &out_a, 1e-6f32, POS0 as i32)
-        .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
-        .grid(((SEQ / BM) as u32, NQ as u32, 1u32))
-        .sync_on(&stream)?;
-    q_norm_rope_prefill_wide_exact_f16(
+    q_norm_rope_prefill_wide_f16(
         &q,
         &qw,
         &inv,
-        (&mut out_b).partition([BM, 1, D]),
+        (&mut out_full).partition([BM, 1, D]),
         1e-6f32,
         POS0 as i32,
     )
     .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
     .grid(((SEQ / BM) as u32, NQ as u32, 1u32))
     .sync_on(&stream)?;
+    const COVERED: usize = 4; // 2 of 3 row-blocks
+    q_norm_rope_prefill_wide_f16(
+        &q,
+        &qw,
+        &inv,
+        (&mut out_pre).partition([BM, 1, D]).prefix(),
+        1e-6f32,
+        POS0 as i32,
+    )
+    .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
+    .grid(((COVERED / BM) as u32, NQ as u32, 1u32))
+    .sync_on(&stream)?;
 
-    let a = out_a.to_host_vec().sync_on(&stream)?;
-    let b = out_b.to_host_vec().sync_on(&stream)?;
-    let bad = (0..a.len()).filter(|&i| a[i].to_bits() != b[i].to_bits()).count();
-    assert_eq!(bad, 0, "{bad} elements differ between exact and general wide kernels");
+    let a = out_full.to_host_vec().sync_on(&stream)?;
+    let b = out_pre.to_host_vec().sync_on(&stream)?;
+    let row = NQ * D;
+    let mut bad = 0usize;
+    for i in 0..SEQ * row {
+        let want = if i < COVERED * row { a[i].to_bits() } else { 0u16 };
+        if b[i].to_bits() != want {
+            bad += 1;
+        }
+    }
+    assert_eq!(bad, 0, "{bad} elements violate prefix-coverage semantics");
     Ok(())
 }
 
