@@ -1,0 +1,32 @@
+==== fmha_prefill_gqa_lpt_checked_bm16_bn128_occ2_even0.cubin
+
+Resource usage:
+ Common:
+  GLOBAL:5375 CONSTANT[4]:48
+ Function fmha_prefill_gqa_lpt_checked_entry:
+  REG:128 STACK:128 SHARED:99484 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:1600 TEXTURE:0 SURFACE:0 SAMPLER:0
+LDL_STL=16
+==== fmha_prefill_gqa_lpt_checked_bm16_bn128_occ2_even1.cubin
+
+Resource usage:
+ Common:
+  GLOBAL:5375 CONSTANT[4]:48
+ Function fmha_prefill_gqa_lpt_checked_entry:
+  REG:128 STACK:128 SHARED:99484 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:1600 TEXTURE:0 SURFACE:0 SAMPLER:0
+LDL_STL=16
+==== fmha_prefill_gqa_lpt_checked_bm16_bn128_occ3_even0.cubin
+
+Resource usage:
+ Common:
+  GLOBAL:5375 CONSTANT[4]:48
+ Function fmha_prefill_gqa_lpt_checked_entry:
+  REG:168 STACK:136 SHARED:165052 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:1600 TEXTURE:0 SURFACE:0 SAMPLER:0
+LDL_STL=24
+==== fmha_prefill_gqa_lpt_checked_bm16_bn128_occ3_even1.cubin
+
+Resource usage:
+ Common:
+  GLOBAL:5375 CONSTANT[4]:48
+ Function fmha_prefill_gqa_lpt_checked_entry:
+  REG:168 STACK:136 SHARED:165052 LOCAL:0 CONSTANT[2]:16 CONSTANT[0]:1600 TEXTURE:0 SURFACE:0 SAMPLER:0
+LDL_STL=24

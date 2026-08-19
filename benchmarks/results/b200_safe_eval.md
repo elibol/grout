@@ -781,3 +781,49 @@ The dominant cuBLAS projection kernels account for 40.7% and 35.7% of total
 GPU kernel time; the associated split-K reduction adds 4.7%. The full trace is
 kept locally rather than committed because the binary report contains
 machine-specific metadata; the sanitized CSV is sufficient for these sums.
+
+## Long-prefill gap follow-up
+
+Date: 2026-08-19
+
+This follow-up used grout `0b9da7f`, cutile-rs `e90f9b8`, Qwen3-32B, and
+default B200 clocks. Detailed raw means and cubins are in
+`benchmarks/results/b200_long_prefill_eval_20260819`.
+
+### LPT spill and occupancy ladder
+
+The shipping checked-LPT `BM=16/BN=128` even-length specialization uses
+`REG=128`, `STACK=128`, 99,484 bytes shared memory, and 16 `LDL/STL`
+instructions. Occupancy 3 increased this to `REG=168`, `STACK=136`, 165,052
+bytes shared, and 24 `LDL/STL` instructions.
+
+At pp=32768, three paired order-alternating rounds measured 3655.532 ms at
+occupancy 2 and 3868.691 ms at occupancy 3. Occupancy 3 is **5.83% slower**, so
+the shipping occupancy remains 2.
+
+### Best-vs-best attention dispatch
+
+Checked-LPT retained a small same-session lead over mapped
+`BM=128/BN=128` attention at both lengths.
+
+| pp | checked-LPT (ms) | mapped (ms) | LPT delta |
+|---:|---:|---:|---:|
+| 16384 | **1383.229** | 1389.006 | **-0.42%** |
+| 32768 | **3653.174** | 3685.957 | **-0.89%** |
+
+No long-prefill dispatch or tuning profile changed.
+
+### Fresh grout-vLLM sweep
+
+The fresh canonical bundle is `benchmarks/results/sweep/20260819_162701`.
+
+| pp | grout e2e (ms) | vLLM e2e (ms) | grout gap | prior gap |
+|---:|---:|---:|---:|---:|
+| 16384 | 1873.66 | **1789.52** | **+4.70%** | +5.83% |
+| 32768 | 4176.77 | **3700.81** | **+12.86%** | +14.39% |
+
+Both engines were 11-17% slower in absolute terms than the preceding session,
+so the modest gap reduction is session drift, not a tuning win. Neither the
+occupancy ladder nor mapped-attention fallback closes the gap. The honest
+residual is **sm_100 long-context attention-kernel efficiency**, which requires
+a separate kernel-engineering effort or a trtllm-gen comparison to quantify.
