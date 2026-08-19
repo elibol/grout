@@ -513,6 +513,70 @@ fn qk_norm_rope_kv_prefill_safe_matches_reference() -> Result<()> {
     Ok(())
 }
 
+/// Exact-coverage safe wide Q kernel (coarse &mut blocks + in-kernel
+/// partition_mut) must produce bit-identical output to the general wide
+/// kernel on the same inputs when the grid covers q_out exactly.
+#[test]
+fn q_norm_rope_prefill_wide_exact_matches_general() -> Result<()> {
+    match Device::device_count() {
+        Ok(count) if count > 0 => {}
+        _ => return Ok(()),
+    }
+    use grout::kernels::{q_norm_rope_prefill_wide_exact_f16, q_norm_rope_prefill_wide_f16};
+    const D: usize = 128;
+    const HALF_D: usize = 64;
+    const NQ: usize = 4;
+    const SEQ: usize = 6;
+    const BM: usize = 2;
+    const POS0: usize = 5;
+
+    let device = Device::new(0)?;
+    let stream = device.new_stream()?;
+    let gen_f16 = |seed: u32, n: usize| -> Arc<Vec<f16>> {
+        let mut v = Vec::with_capacity(n);
+        let mut x = seed;
+        for _ in 0..n {
+            x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+            v.push(f16::from_f32(((x >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0));
+        }
+        Arc::new(v)
+    };
+    let inv_host: Arc<Vec<f32>> = Arc::new(
+        (0..HALF_D)
+            .map(|i| 1.0f32 / 10000f32.powf(2.0 * i as f32 / D as f32))
+            .collect(),
+    );
+    let q_h = gen_f16(31, SEQ * NQ * D);
+    let qw_h = gen_f16(32, D);
+    let q = Arc::new(api::copy_host_vec_to_device(&q_h).reshape(&[SEQ, NQ, D]).sync_on(&stream)?);
+    let qw = Arc::new(api::copy_host_vec_to_device(&qw_h).reshape(&[D]).sync_on(&stream)?);
+    let inv = Arc::new(api::copy_host_vec_to_device(&inv_host).reshape(&[HALF_D]).sync_on(&stream)?);
+    let out_a = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
+    let mut out_b = api::zeros::<f16>(&[SEQ, NQ, D]).sync_on(&stream)?;
+
+    q_norm_rope_prefill_wide_f16(&q, &qw, &inv, &out_a, 1e-6f32, POS0 as i32)
+        .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
+        .grid(((SEQ / BM) as u32, NQ as u32, 1u32))
+        .sync_on(&stream)?;
+    q_norm_rope_prefill_wide_exact_f16(
+        &q,
+        &qw,
+        &inv,
+        (&mut out_b).partition([BM, 1, D]),
+        1e-6f32,
+        POS0 as i32,
+    )
+    .generics(vec![D.to_string(), HALF_D.to_string(), BM.to_string()])
+    .grid(((SEQ / BM) as u32, NQ as u32, 1u32))
+    .sync_on(&stream)?;
+
+    let a = out_a.to_host_vec().sync_on(&stream)?;
+    let b = out_b.to_host_vec().sync_on(&stream)?;
+    let bad = (0..a.len()).filter(|&i| a[i].to_bits() != b[i].to_bits()).count();
+    assert_eq!(bad, 0, "{bad} elements differ between exact and general wide kernels");
+    Ok(())
+}
+
 /// LPT stride invariance: the checked kernel's output on a padded KV cache
 /// (rows > kv_len — the engine's real layout) must equal its output on a
 /// contiguous cache. The deleted raw kernel failed exactly this (kv_len*D

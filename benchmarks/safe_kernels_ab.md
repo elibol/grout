@@ -359,6 +359,20 @@ lattice case, once per CTA). Per-row sub-range kernels unchanged by
 design. 5090 sanity at the new compiler: pp=2048 ~62 ms / pp=8192
 ~392 ms, text and decode unchanged, 6 GPU tests pass.
 
+## Coarse-mut wide Q kernel (exact coverage, 2026-08-18)
+
+`q_norm_rope_prefill_wide_exact_f16`: the coarse `&mut Tensor<{[BM,1,D]}>`
+per-CTA binding + in-kernel safe `partition_mut` form of the wide Q
+kernel — zero unsafe, deny-gated, bit-identical to the general wide
+kernel (equivalence test). The `&mut` binding's launch validation
+requires exact tensor coverage, so the host dispatches it only when
+seq_len % BM == 0 (all benchmark lengths; the general
+`partition_full_mut` kernel + per-row tail covers everything else).
+The pending cutile-rs partial-coverage relaxation (per-axis
+grid <= inferred) retires the general kernel entirely. KV/decode
+kernels cannot take this form yet (cache bindings are inherently
+partial over max_seq and need offset + Arc-consuming bindings).
+
 ## Engine GEMM policy
 
 Any cuTile GEMM wired into engine paths must sit behind

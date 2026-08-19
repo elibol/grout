@@ -9,7 +9,7 @@ use crate::kernels::{
     fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
     k_norm_rope_v_prefill_f16, k_norm_rope_v_prefill_wide_f16, q_norm_rope_prefill_f16,
-    q_norm_rope_prefill_wide_f16,
+    q_norm_rope_prefill_wide_exact_f16, q_norm_rope_prefill_wide_f16,
     qk_norm_rope_kv_decode_f16, qk_rope_dynpos_mapped_f16,
     rms_norm_mapped_f16, rope_seq_dynpos_f16, rope_seq_f16, silu_mul_2d_f16,
     splitk_reduce_merge_mapped,
@@ -4493,7 +4493,28 @@ impl Qwen3Engine {
         let tail_rows = seq_len - bulk_rows;
         // SAFETY: ctx-based execute is the unsafe API surface here; the
         // split kernels themselves are safe.
-        if bulk_rows > 0 {
+        if tail_rows == 0 && bulk_rows > 0 {
+            // Exact coverage: the safe coarse-mut kernel (zero unsafe,
+            // deny-gated). The &mut binding's launch validation requires
+            // the grid to cover q_out exactly, hence the tail_rows gate.
+            unsafe {
+                q_norm_rope_prefill_wide_exact_f16(
+                    &q,
+                    &weights.q_norm,
+                    &self.inv_freq,
+                    (&mut out).partition([bm, 1, self.cfg.head_dim]),
+                    self.cfg.rms_norm_eps,
+                    position_start as i32,
+                )
+                .generics(vec![
+                    self.cfg.head_dim.to_string(),
+                    half_d.to_string(),
+                    bm.to_string(),
+                ])
+                .grid(((bulk_rows / bm) as u32, attn_heads as u32, 1u32))
+                .execute(ctx)?;
+            }
+        } else if bulk_rows > 0 {
             unsafe {
                 q_norm_rope_prefill_wide_f16(
                     &q,
