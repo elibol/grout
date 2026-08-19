@@ -754,3 +754,30 @@ pure prefill, while vLLM reports TTFT including one decode step. Request e2e is
 therefore the cross-engine decision metric. SGLang was attempted by each
 wrapper but its installed sm_100 extension could not load `libnuma.so.1`; no
 SGLang rows are reported. The failure is retained in each sweep summary.
+
+## Decode CUDA graph-node profile
+
+Date: 2026-08-19
+
+The profile used Qwen3-32B, default GPU clocks, an 18-token prompt, 512 fixed
+generated tokens, `max_seq_len=4096`, one discarded warmup, and one measured
+repetition. Nsight Systems 2026.2 used `--cuda-graph-trace=node`. The public
+summary and kernel CSV are in
+`benchmarks/results/profile_b200_32b_decode_20260819_012529`.
+
+The export covers the graph-capture decode plus warmup and measured runs:
+1,534 decode steps and 98,176 per-layer launches. Per-layer decode attention
+averaged 5.854 us for `fmha_decode_gqa_split_mapped` plus 2.778 us for
+`splitk_reduce_merge_mapped`, or **8.632 us combined**. The fused
+`qk_norm_rope_kv_decode_f16` kernel averaged **2.862 us** and represented only
+1.34% of total traced GPU kernel time, so restructuring it is low leverage.
+
+| GPU kernel family | time (ms) | share |
+|---|---:|---:|
+| cuBLAS/cuBLASLt | 17447.712 | **83.03%** |
+| cuTile | 3565.049 | **16.97%** |
+
+The dominant cuBLAS projection kernels account for 40.7% and 35.7% of total
+GPU kernel time; the associated split-K reduction adds 4.7%. The full trace is
+kept locally rather than committed because the binary report contains
+machine-specific metadata; the sanitized CSV is sufficient for these sums.

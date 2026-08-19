@@ -1,0 +1,33 @@
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+40.7,8562241790,98176,87213.2,87169.0,84608,91104,757.2,cutlass3x_sm100_tensorop_h64x64x16gemm_f16_f16_f16_f16_f16_64x64x64_0_tnn_align8_1sm_bias_f16_relu
+35.7,7508960350,294529,25494.8,18176.0,15200,44928,11774.8,nvjet_sm100_hsh_64x8_64x16_2x1_v_bx_splitK_TNT
+10.3,2168695267,196352,11044.9,11072.0,9568,13152,627.5,add_rms_norm_decode_bounded_f16_entry
+4.7,989059363,296835,3332.0,3264.0,2496,10656,508.4,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, __half, float, __half, (bool)0, float, __half, __half, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+2.7,574687826,98176,5853.6,5824.0,5152,9632,350.8,fmha_decode_gqa_split_mapped_entry
+1.7,352087664,1538,228925.7,228928.0,225632,238112,1157.5,nvjet_sm100_hsh_192x8_64x8_2x1_v_bx_splitK_TNT
+1.3,280975917,98177,2861.9,2816.0,2719,5248,180.0,qk_norm_rope_kv_decode_f16_entry
+1.3,272772433,98176,2778.4,2784.0,2624,3648,36.0,splitk_reduce_merge_mapped_entry
+1.1,221623125,98369,2253.0,2240.0,2016,3744,105.9,silu_mul_2d_f16_entry
+0.1,17507517,384,45592.5,45504.0,44128,48864,688.3,nvjet_sm100_hsh_192x24_64x7_2x1_v_bx_TNT
+0.1,12576577,1538,8177.2,8192.0,8032,10368,72.7,argmax_blocks_f16_entry
+0.0,9475003,610,15532.8,18048.0,1024,18816,6058.3,full_entry
+0.0,8663871,192,45124.3,45056.0,43744,47008,625.6,nvjet_sm100_hsh_128x32_64x12_2x1_2cta_v_bx_splitK_TNT
+0.0,7279808,1731,4205.6,4064.0,3904,6080,473.7,rms_norm_mapped_f16_entry
+0.0,4306464,193,22313.3,22400.0,6976,22848,1121.8,q_norm_rope_prefill_f16_entry
+0.0,3680927,1538,2393.3,2368.0,2048,4768,165.4,embedding_batch_f16_entry
+0.0,3408736,1535,2220.7,2208.0,2176,2560,62.1,argmax_reduce_blocks_to_u32_entry
+0.0,3326016,192,17323.0,17216.0,16544,21280,608.4,nvjet_sm100_hsh_128x16_64x12_1x2_h_bx_splitK_TNT
+0.0,3169694,192,16508.8,16400.0,15808,20544,588.6,nvjet_sm100_hsh_64x24_64x16_4x1_v_bx_TNT
+0.0,2696064,384,7021.0,7040.0,5760,8288,386.9,nvjet_sm100_hsh_64x16_64x16_2x2_2cta_h_bx_splitK_TNT
+0.0,2020191,193,10467.3,10464.0,8032,11232,354.5,add_rms_norm_mapped_f16_entry
+0.0,1681887,194,8669.5,8720.0,6048,9440,346.7,fmha_prefill_causal_mapped_entry
+0.0,1349727,193,6993.4,7008.0,5504,7168,125.7,k_norm_rope_v_prefill_f16_entry
+0.0,469696,193,2433.7,2400.0,1984,2880,169.9,add_2d_f16_entry
+0.0,13248,1,13248.0,13248.0,13248,13248,0.0,qk_rope_dynpos_mapped_f16_entry
+0.0,8064,1,8064.0,8064.0,8064,8064,0.0,fmha_causal_mapped_entry
+0.0,7648,4,1912.0,1952.0,1664,2080,176.0,gather_row_f16_entry
+0.0,5216,1,5216.0,5216.0,5216,5216,0.0,qk_norm_mapped_f16_entry
+0.0,3136,1,3136.0,3136.0,3136,3136,0.0,kv_cache_update_seq_dynpos_mapped_f16_entry
+0.0,3008,1,3008.0,3008.0,3008,3008,0.0,kv_cache_update_seq_mapped_f16_entry
+0.0,2368,1,2368.0,2368.0,2368,2368,0.0,rope_seq_f16_entry
+0.0,2336,1,2336.0,2336.0,2336,2336,0.0,rope_seq_dynpos_f16_entry
