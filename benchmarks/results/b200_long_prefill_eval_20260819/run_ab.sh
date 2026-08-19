@@ -25,7 +25,7 @@ run_one() {
     log="$OUT/logs/${experiment}_pp${pp}_${arm}_r${round}.log"
     capture_dir=""
     if [[ "$experiment:$arm:$round" == "occupancy:B:1" ]]; then
-        capture_dir="/tmp/grout_lpt_capture_occ3_20260819/cubins"
+        capture_dir="${TMPDIR:?set TMPDIR to a writable temporary directory}/grout_lpt_capture_occ3_20260819/cubins"
         mkdir -p "$capture_dir"
     fi
 
