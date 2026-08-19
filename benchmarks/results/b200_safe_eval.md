@@ -523,3 +523,71 @@ prefill regression: 21.5% at pp=2048 and 19.5% at pp=8192 versus `b924b88`.
 The old `REG 255 / STACK 416` kernel is gone from the live prefill path, though
 all four replacements still spill and remain sm_100 code-generation follow-up
 material. No source or tuning default was changed by this validation.
+
+## Deny-checked wide-Q compiler validation
+
+Date: 2026-08-18
+
+### Revisions and correctness
+
+- grout: `8f3c36248919a75f02f98010ccfd858cbf58696a`
+- cutile-rs: `0608dd72440cce68f22df0f2357fdb30a5520e00`
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B
+
+Both release binaries were rebuilt, including the separately feature-gated
+`grout_bench`. All six GPU kernel tests passed. A 2048-token raw prompt followed
+by 24 generated tokens was byte-identical to the prior run, with SHA-256
+`407673405ccd7be79b119811ced911cba08b12f1ea59758a3bc676fd8d68cf74`.
+
+The wide Q kernel compiled with `deny_in_kernel_checks = true`. Its JIT placement
+counts at the shipping `BM=32` were 15 discharged, zero hoisted, and zero
+in-place checks. Resource capture through a `CUTILE_TILEIRAS_PATH` wrapper also
+succeeded with `CUTILE_BYTECODE_VERSION` unset, confirming the bytecode-probe
+fix in this compiler revision.
+
+### Resource audit
+
+The before values are from the immediately preceding `21f2135` validation with
+cutile-rs `61012a7`. The after values combine the grout and compiler revisions.
+
+| kernel | REG before / after | STACK before / after (bytes) | LDL/STL before / after |
+|---|---:|---:|---:|
+| `q_norm_rope_prefill_wide_f16`, `BM=32` | 128 / 128 | 160 / **32** | 176 / **160** |
+| `k_norm_rope_v_prefill_wide_f16`, `BM=32` | 128 / 128 | 288 / **96** | 192 / **168** |
+| `q_norm_rope_prefill_f16` tail | 128 / 128 | 272 / 272 | 90 / 90 |
+| `k_norm_rope_v_prefill_f16` tail | 128 / 128 | 320 / 320 | 86 / 86 |
+
+The compiler update substantially reduces local storage for both wide kernels,
+not only the newly deny-checked Q entry. Neither wide kernel is spill-free, and
+the two tail kernels are unchanged.
+
+### Prefill timing
+
+Each round used a fresh process, one discarded warmup, and three measured
+prefills. The round order was 2048/8192, 8192/2048, 2048/8192. GPU clocks were
+left at their defaults, generated tokens were zero, and op profiling was off.
+
+| pp | round means (ms) | overall (ms) | prior `21f2135` (ms) | delta |
+|---:|---:|---:|---:|---:|
+| 2048 | 116.316 / 117.349 / 122.598 | **118.754** | 139.281 | **-14.74%** |
+| 8192 | 544.992 / 545.447 / 544.489 | **544.976** | 630.202 | **-13.52%** |
+
+For historical context only, the July safe-bundle values were 121.91 ms at
+pp=2048 and 544.12 ms at pp=8192. The new results are 2.59% lower and 0.16%
+higher, respectively. These are not paired comparisons across those sessions.
+
+### Synchronized op profile
+
+At pp=2048, `QkNormRopeKvPrefill` measured 6.784 ms over 64 layer calls, or
+**106.00 us/layer**, down 24.22% from the preceding 139.88 us/layer result.
+This remains 7.07x the approximate 15 us/layer floor. `Attention` measured
+157.70 us/layer in the same synchronized profile.
+
+### Verdict
+
+The zero-in-place-check wide Q kernel is correct on sm_100, and the updated tree
+recovers essentially all of the remaining long-prefill gap to the July context.
+The resource and timing gains are a combined grout-plus-compiler result, not a
+paired single-variable attribution. Wide-kernel spills remain a cutile-rs
+sm_100 code-generation follow-up; the tail-kernel resource use is unchanged.
+No engine path or tuning default was changed by this validation.
