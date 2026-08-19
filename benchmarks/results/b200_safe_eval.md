@@ -646,3 +646,62 @@ new compiler and `CUTILE_BYTECODE_VERSION` remained unset.
 Wide Q exactly matches the prior `REG 128 / STACK 32 / 160 LDL-STL` result and
 again compiles with 15 discharged, zero hoisted, and zero in-place checks. No
 engine default or tuning profile changed in this phase.
+
+## sm_100 retune after prefix coverage
+
+Date: 2026-08-18
+
+All cells used Qwen3-32B, at least one discarded warmup, and a freshly rebuilt
+feature-gated benchmark binary. The stock tile scripts were used unchanged, but
+their grids were bounded to the decision cells because every subprocess reloads
+the 32B weights and the exhaustive 160-process matrix exceeds this allocation.
+
+### Mapped prefill and decode screens
+
+The long causal mapped-attention screen used three measured reps per cell. The
+shipping `BM=128/BN=128` tile remained the observed winner at both lengths.
+
+| pp | BM | BN=32 (ms) | BN=64 (ms) | BN=128 (ms) |
+|---:|---:|---:|---:|---:|
+| 2048 | 32 | 144.61 | 138.60 | 136.23 |
+| 2048 | 64 | 121.44 | 117.73 | 117.31 |
+| 2048 | 128 | 118.17 | 119.64 | **115.76** |
+| 8192 | 32 | 955.09 | 854.65 | 812.09 |
+| 8192 | 64 | 596.83 | 553.68 | 537.56 |
+| 8192 | 128 | 557.53 | 541.67 | **521.42** |
+
+The tg=36 decode endpoint screen was effectively tied: `BN=16/NKS=4`
+measured 470.71 ms and `BN=32/NKS=4` measured 470.12 ms over 36 tokens. The
+0.13% unpaired difference is noise, so no decode profile changed. The decode
+kernel and its compiler lowering were unchanged by the wide-prefill work.
+
+### Wide-Q BM paired sweep
+
+Three balanced orderings were run for `BM={16,32,64}`. Each process contained
+one warmup and three measured prefills.
+
+| pp | BM=16 (ms) | BM=32 (ms) | BM=64 (ms) | decision |
+|---:|---:|---:|---:|---|
+| 2048 | 118.975 | **118.114** | 118.788 | retain 32 |
+| 8192 | 547.996 | **544.124** | 544.361 | retain 32 |
+
+BM64's 0.04% difference from BM32 at pp=8192 is noise and it loses by 0.57%
+at pp=2048. The shipping wide-Q `BM=32` default therefore remains unchanged.
+
+### Long LPT retune
+
+The screen retained `BM=16`, `SWIZZLE=8`, `SCHED=1`, and `LATENCY=2`: BM8 was
+substantially slower, while swizzle 4 and scheduler 0 did not improve either
+long-context cell. Increasing BN from 64 to 128 won at both lengths, so it was
+confirmed with two order-reversed paired rounds.
+
+| pp | metric | BN=64 | BN=128 | delta |
+|---:|---|---:|---:|---:|
+| 16384 | Attention (us/layer) | 6090.24 | **5912.61** | **-2.92%** |
+| 16384 | prefill (ms) | 1221.756 | **1206.347** | **-1.26%** |
+| 32768 | Attention (us/layer) | 23805.67 | **23257.09** | **-2.30%** |
+| 32768 | prefill (ms) | 3154.285 | **3111.935** | **-1.34%** |
+
+`sweep_pp_sm100.sh` now explicitly selects checked LPT with
+`BM=16/BN=128/SWIZZLE=8/SCHED=1/LATENCY=2` for pp=16384 and pp=32768. All
+pp<=8192 profiles and `sweep_tg_sm100.sh` remain unchanged.
