@@ -705,3 +705,52 @@ confirmed with two order-reversed paired rounds.
 `sweep_pp_sm100.sh` now explicitly selects checked LPT with
 `BM=16/BN=128/SWIZZLE=8/SCHED=1/LATENCY=2` for pp=16384 and pp=32768. All
 pp<=8192 profiles and `sweep_tg_sm100.sh` remain unchanged.
+
+## Canonical Qwen3-32B sweeps after sm_100 retune
+
+Date: 2026-08-19
+
+GPU clocks were left at driver defaults. Each cell used three discarded
+warmups; short cells used ten measured reps and long-prefill cells used three.
+The public result bundles are:
+
+- prefill: `benchmarks/results/sweep/20260819_003933`
+- decode: `benchmarks/results/sweep/20260819_005600`
+- long prefill: `benchmarks/results/sweep/20260819_011004`
+
+### Prefill sweep
+
+The table reports median request latency. The grout-vs-vLLM delta is negative
+when grout is faster.
+
+| pp | grout e2e (ms) | vLLM e2e (ms) | grout delta | grout pure prefill (ms) |
+|---:|---:|---:|---:|---:|
+| 18 | **462.09** | 468.26 | **-1.32%** | 16.33 |
+| 128 | **460.98** | 469.83 | **-1.88%** | 16.39 |
+| 512 | **484.24** | 493.19 | **-1.82%** | 29.71 |
+| 2048 | **582.01** | 592.26 | **-1.73%** | 117.65 |
+
+### Decode sweep
+
+| tg | grout request tok/s | vLLM request tok/s | grout delta | grout decode tok/s |
+|---:|---:|---:|---:|---:|
+| 36 | **77.8** | 76.9 | **+1.2%** | 80.7 |
+| 128 | **78.4** | 77.3 | **+1.4%** | 79.2 |
+| 512 | **78.9** | 77.4 | **+1.9%** | 79.1 |
+
+The cross-tg latency fit gives 79.0 decode tok/s for grout and 77.4 for vLLM.
+
+### Long prefill sweep
+
+The checked-LPT winner from the retune was active in both grout cells.
+
+| pp | grout e2e (ms) | vLLM e2e (ms) | grout delta | grout pure prefill (ms) |
+|---:|---:|---:|---:|---:|
+| 16384 | 1679.11 | **1586.57** | **+5.83%** | 1202.98 |
+| 32768 | 3625.25 | **3169.33** | **+14.39%** | 3123.57 |
+
+The engine-specific prefill timers are not directly comparable: grout reports
+pure prefill, while vLLM reports TTFT including one decode step. Request e2e is
+therefore the cross-engine decision metric. SGLang was attempted by each
+wrapper but its installed sm_100 extension could not load `libnuma.so.1`; no
+SGLang rows are reported. The failure is retained in each sweep summary.
