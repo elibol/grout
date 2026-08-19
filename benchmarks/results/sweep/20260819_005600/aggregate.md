@@ -6,7 +6,7 @@ n reps = 10 per cell; per-cell tables report medians unless labeled otherwise. T
 
 The roofline columns use an idealized batch-1 request-level upper bound with zero software overhead: `tg / (T_prefill_ideal + T_decode_roof)`. Decode uses FP16 weight bytes plus average KV-cache bytes. The table reports both nominal-bandwidth and effective-bandwidth roof fractions; nominal is the hardware-spec comparison, while effective is just the configured bandwidth fraction or explicit bandwidth override. Prefill uses `2 * P * pp / FLOPs_peak` only to match the request-level metric boundary.
 
-Parameters: `BW_nominal=8000.0 GB/s`, `BW_eff=6800.0 GB/s` (85% of 8000 GB/s), `W=65.52 GB`, `KV_step=0.262 MB/context-token`, `prefill_peak=417.8 TFLOP/s`, `alpha=0`, model=/home/scratch.melibol_research/dev/hf_models/qwen3_32b.
+Parameters: `BW_nominal=8000.0 GB/s`, `BW_eff=6800.0 GB/s` (85% of 8000 GB/s), `W=65.52 GB`, `KV_step=0.262 MB/context-token`, `prefill_peak=417.8 TFLOP/s`, `alpha=0`, model=<model>.
 
 ## Request Generation Throughput
 
