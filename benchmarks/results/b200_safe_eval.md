@@ -591,3 +591,58 @@ The resource and timing gains are a combined grout-plus-compiler result, not a
 paired single-variable attribution. Wide-kernel spills remain a cutile-rs
 sm_100 code-generation follow-up; the tail-kernel resource use is unchanged.
 No engine path or tuning default was changed by this validation.
+
+## Prefix-coverage wide-Q validation
+
+Date: 2026-08-18
+
+### Revisions and correctness
+
+- grout: `ef943f3876094438f93816afe3ec95b4babaee7a`
+- cutile-rs: `e90f9b8f1c24d0eb9528741395edda02bf441361`
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B
+
+Both release binaries were rebuilt, including the feature-gated
+`grout_bench`. All seven GPU kernel tests passed, including
+`q_norm_rope_prefill_wide_prefix_coverage_semantics`. The established
+2048-token prompt followed by 24 generated tokens remained byte-identical,
+with SHA-256
+`407673405ccd7be79b119811ced911cba08b12f1ea59758a3bc676fd8d68cf74`.
+
+An exact 2051-token raw prompt exercised the safe `BM=32` wide-Q prefix over
+2048 rows followed by the three-row mapped tail. It completed without a CUDA or
+launch-validation error and generated a coherent 24-token continuation.
+
+### Paired commit A/B
+
+`ac7ff84` and `ef943f3` used separate freshly built benchmark binaries against
+the same cutile-rs `e90f9b8`. Three rounds used old/new, new/old, old/new order
+at each prompt length. Each process ran one discarded warmup and three measured
+prefills; generated tokens were zero and GPU clocks were left at their defaults.
+
+| pp | `ac7ff84` round means (ms) | `ef943f3` round means (ms) | overall old / new (ms) | new delta |
+|---:|---:|---:|---:|---:|
+| 2048 | 119.047 / 120.545 / 117.628 | 117.996 / 118.900 / 119.803 | 119.073 / **118.899** | **-0.146%** |
+| 8192 | 546.305 / 548.214 / 543.558 | 545.914 / 545.350 / 545.536 | 546.026 / **545.600** | **-0.078%** |
+
+The new values are 0.122% and 0.115% above the prior-session `ac7ff84`
+references of 118.754 and 544.976 ms. Both paired and cross-session results are
+within noise; the prefix-coverage safety change has parity performance.
+
+### Diagnostic cubins
+
+Fresh cubins for the four prefill kernels and fused decode kernel are in
+`benchmarks/results/b200_safe_eval_cubins_ef943f3/`. Resource capture used the
+new compiler and `CUTILE_BYTECODE_VERSION` remained unset.
+
+| kernel | generics | REG | STACK (bytes) | SHARED (bytes) | LDL/STL |
+|---|---|---:|---:|---:|---:|
+| `q_norm_rope_prefill_wide_f16` | `128,64,32` | 128 | 32 | 19764 | 160 |
+| `k_norm_rope_v_prefill_wide_f16` | `128,64,32` | 128 | 96 | 27972 | 168 |
+| `q_norm_rope_prefill_f16` tail | `128,64,1,1,2` | 128 | 272 | 31156 | 90 |
+| `k_norm_rope_v_prefill_f16` tail | `128,64,1,1,2` | 128 | 320 | 29124 | 86 |
+| `qk_norm_rope_kv_decode_f16` | `128,64,4096` | 128 | 176 | 13548 | 28 |
+
+Wide Q exactly matches the prior `REG 128 / STACK 32 / 160 LDL-STL` result and
+again compiles with 15 discharged, zero hoisted, and zero in-place checks. No
+engine default or tuning profile changed in this phase.
