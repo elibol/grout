@@ -1086,3 +1086,27 @@ not validate trtllm numerical parity because its kernel never launched.
 Consequently the paired long-prefill trtllm A/B and canonical trtllm sweep arm
 were skipped rather than reporting fallback timings as backend results. A
 matching FP16 `SeparateQkv` causal context artifact is required to resume them.
+
+## Canonical paper sweep: short and mid prefill
+
+Date: 2026-08-20
+
+The clean B200/Qwen3-32B bundle is
+`benchmarks/results/sweep/20260820_145859_b200_32b_canonical_pp`. The engine
+source is grout `69fb4ed` with cutile-rs `e90f9b8`; clocks were left at their
+defaults. Cells through pp=512 used 10 measured requests and pp=2048 used 3,
+all after 3 warmups. vLLM prefix caching and SGLang radix caching were disabled.
+SGLang was backfilled successfully after supplying the missing system
+`libnuma.so.1` at runtime; it selected `trtllm_mha`, while vLLM auto-selected
+TRTLLM prefill attention.
+
+| pp | grout e2e (ms) | vLLM e2e (ms) | grout vs vLLM | SGLang e2e (ms) |
+|---:|---:|---:|---:|---:|
+| 18 | **458.92** | 461.75 | -0.61% | 480.45 |
+| 128 | **456.14** | 463.44 | -1.58% | 480.87 |
+| 512 | **480.70** | 484.82 | -0.85% | 498.03 |
+| 2048 | 586.76 | **577.34** | +1.63% | 588.13 |
+
+The corresponding direct grout prefill medians are 16.45, 16.47, 29.19, and
+113.60 ms. Baseline `prefill_ms` is TTFT rather than a pure prefill timer, so
+the table uses the cross-engine e2e metric for comparisons.
