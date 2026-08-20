@@ -5717,7 +5717,7 @@ impl Qwen3Engine {
                         "GROUT_FMHA_PREFILL_LPT_SCHED={prefill_sched} must be in 0..=3"
                     );
                     let prefill_mask_split =
-                        if env_bool_or("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", false) {
+                        if env_bool_or("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", true) {
                             1
                         } else {
                             0

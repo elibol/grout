@@ -827,3 +827,17 @@ so the modest gap reduction is session drift, not a tuning win. Neither the
 occupancy ladder nor mapped-attention fallback closes the gap. The honest
 residual is **sm_100 long-context attention-kernel efficiency**, which requires
 a separate kernel-engineering effort or a trtllm-gen comparison to quantify.
+
+## LPT mask-split default adopted (2026-08-19, 5090 evidence)
+
+SASS inspection of the sm_100 LPT cubin (which does use tcgen05:
+16 UTCHMMA + LDTM/STTM — an earlier grep matched the HMMA substring and
+misread it) showed 128 FSEL mask selects per loop body from the causal
+mask running on every kv tile: GROUT_FMHA_PREFILL_LPT_MASK_SPLIT
+defaulted to off and was never swept. 5090 paired A/B (LPT forced,
+SWIZZLE=8/SCHED=1): pp=16384 755.6 vs 778.7 ms (-3.0%), pp=32768 2246.3
+vs 2323.2 ms (-3.3%); bench text byte-identical (mask arithmetic is
+exact: unmasked lanes add 0.0). Default flipped to on. B200
+validation pending; the mask work is arch-independent register
+elementwise, so a comparable win is expected at 16K/32K there
+(prior gap vs vLLM: +5.8%/+14.4%).
