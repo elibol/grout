@@ -8,6 +8,7 @@ use crate::kernels::{
     fmha_decode_gqa_split_mapped, fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt_checked,
     fmha_prefill_gqa_mapped, gather_row_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, qk_norm_mapped_f16,
+    fmha_prefill_gqa_lpt_unchecked_twin,
     k_norm_rope_v_prefill_f16, k_norm_rope_v_prefill_wide_f16, q_norm_rope_prefill_f16,
     q_norm_rope_prefill_wide_f16,
     qk_norm_rope_kv_decode_f16, qk_rope_dynpos_mapped_f16,
@@ -5737,38 +5738,65 @@ impl Qwen3Engine {
                     let num_hb_quotient = num_head_groups / swizzle;
                     let num_hb_remainder = (num_head_groups % swizzle).max(1);
                     let grid_x = (num_q_blocks * num_head_groups) as u32;
-                    // SAFETY: ctx-based execute; the kernel itself is safe.
-                    unsafe {
-                        fmha_prefill_gqa_lpt_checked(
-                            &q,
-                            &**k_cache,
-                            &**v_cache,
-                            &out,
-                            value(qk_scale),
-                            value(query_group_size),
-                            value(kv_len),
-                            value(*position_start as i32),
-                            value(num_q_blocks as i32),
-                            value(num_head_groups as i32),
-                            value(swizzle as i32),
-                            value(num_hb_quotient as i32),
-                            value(num_hb_remainder as i32),
-                        )
-                        .generics(vec![
-                            attn_bm.to_string(),
-                            attn_bn.to_string(),
-                            self.cfg.head_dim.to_string(),
-                            group.to_string(),
-                            m_eff.to_string(),
-                            1.to_string(), // CAUSAL
-                            even_k.to_string(),
-                            prefill_latency.to_string(),
-                            prefill_sched.to_string(),
-                            prefill_mask_split.to_string(),
-                        ])
-                        .grid((grid_x, 1u32, 1u32))
-                        .compile_options(compile_options_with_occupancy(prefill_occupancy))
-                        .execute(ctx)?;
+                    let generics = vec![
+                        attn_bm.to_string(),
+                        attn_bn.to_string(),
+                        self.cfg.head_dim.to_string(),
+                        group.to_string(),
+                        m_eff.to_string(),
+                        1.to_string(), // CAUSAL
+                        even_k.to_string(),
+                        prefill_latency.to_string(),
+                        prefill_sched.to_string(),
+                        prefill_mask_split.to_string(),
+                    ];
+                    if env_bool_or("GROUT_FMHA_PREFILL_LPT_UNSAFE_TWIN", false) {
+                        // DIAGNOSTIC only: exact-body unchecked twin for
+                        // sm_100 checked-lowering A/Bs. Never the default.
+                        unsafe {
+                            fmha_prefill_gqa_lpt_unchecked_twin(
+                                &q,
+                                &**k_cache,
+                                &**v_cache,
+                                &out,
+                                value(qk_scale),
+                                value(query_group_size),
+                                value(kv_len),
+                                value(*position_start as i32),
+                                value(num_q_blocks as i32),
+                                value(num_head_groups as i32),
+                                value(swizzle as i32),
+                                value(num_hb_quotient as i32),
+                                value(num_hb_remainder as i32),
+                            )
+                            .generics(generics)
+                            .grid((grid_x, 1u32, 1u32))
+                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                            .execute(ctx)?;
+                        }
+                    } else {
+                        // SAFETY: ctx-based execute; the kernel itself is safe.
+                        unsafe {
+                            fmha_prefill_gqa_lpt_checked(
+                                &q,
+                                &**k_cache,
+                                &**v_cache,
+                                &out,
+                                value(qk_scale),
+                                value(query_group_size),
+                                value(kv_len),
+                                value(*position_start as i32),
+                                value(num_q_blocks as i32),
+                                value(num_head_groups as i32),
+                                value(swizzle as i32),
+                                value(num_hb_quotient as i32),
+                                value(num_hb_remainder as i32),
+                            )
+                            .generics(generics)
+                            .grid((grid_x, 1u32, 1u32))
+                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                            .execute(ctx)?;
+                        }
                     }
 
                     out

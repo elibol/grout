@@ -881,3 +881,28 @@ SGLang was attempted by the standard wrapper but its sm_100 extension could
 not load `libnuma.so.1`; this validation required only grout and vLLM. The
 remaining 32K gap is the previously identified within-tcgen05 long-context
 attention-efficiency limitation.
+
+## Raw-LPT resurrection audit (2026-08-20, 5090)
+
+Question: is the checked LPT kernel slower than the deleted unsafe one —
+should we ship one less safe kernel? Evidence:
+
+1. **The raw kernel's bug is real and reconfirmed on device.** The
+   verbatim historical kernel (`fmha_prefill_gqa_lpt_raw_resurrected`,
+   kept in-tree as a diagnostic pinned by the stride test) produces
+   32768/65536 wrong outputs (exactly the kv-head-1 half) on the
+   engine's padded cache layout, 0 wrong on a contiguous cache — the
+   kv_len-vs-max_seq head stride. "Going back" as-was ships wrong
+   results.
+2. **The fixed unsafe variant is the checked kernel.** Same body; the
+   exact-body unchecked twin (`fmha_prefill_gqa_lpt_unchecked_twin`,
+   env GROUT_FMHA_PREFILL_LPT_UNSAFE_TWIN=1) exists for a definitive
+   sm_100 A/B; sm_120 twin A/Bs measured parity twice, and sm_100
+   cross-compilation shows the same UTCHMMA/TMA SASS class.
+3. **Shape matches or beats the vLLM/SGLang Triton references.** Both
+   use BLOCK_M rows x one q head (K/V reloaded per head); ours packs
+   BM=16 x GROUP=4 at the same mma M=64 with 4x K/V reuse. Their
+   BLOCK_M=128 shape (our BM=32, M_EFF=128) measured 5.8x slower at
+   16K/32K on the 5090 — register cliff. Note vLLM's B200 long-context
+   numbers come from trtllm-gen/FA3 CUDA backends, not these Triton
+   kernels, so no Triton-shape change can close that gap.

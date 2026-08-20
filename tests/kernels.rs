@@ -690,6 +690,38 @@ fn fmha_prefill_lpt_checked_matches_and_fixes_strides() -> Result<()> {
     )
     .generics(generics.clone()).grid((grid_x, 1, 1)).sync_on(&stream)?;
 
+    // 1b) resurrected RAW kernel — bug confirmation. On the CONTIGUOUS
+    // cache its kv_len-derived strides agree with the layout, so it must
+    // match truth; on the PADDED cache (the engine's real layout) the
+    // strides are wrong for kv heads >= 1, so it must diverge.
+    use grout::kernels::fmha_prefill_gqa_lpt_raw_resurrected;
+    let out_raw_c = api::zeros::<f16>(&[QLEN, QHEADS, D]).sync_on(&stream)?;
+    unsafe {
+        fmha_prefill_gqa_lpt_raw_resurrected(
+            q.device_pointer().clone(),
+            k_c.device_pointer().clone(),
+            v_c.device_pointer().clone(),
+            out_raw_c.device_pointer().clone(),
+            value(scale), value(qgs), value(QLEN as i32), value(KVLEN as i32), value(0i32),
+            value(num_q_blocks), value(num_head_groups),
+            value(1i32), value(2i32), value(1i32),
+        )
+        .generics(generics.clone()).grid((grid_x, 1, 1)).sync_on(&stream)?;
+    }
+    let out_raw_p = api::zeros::<f16>(&[QLEN, QHEADS, D]).sync_on(&stream)?;
+    unsafe {
+        fmha_prefill_gqa_lpt_raw_resurrected(
+            q.device_pointer().clone(),
+            k_p.device_pointer().clone(),
+            v_p.device_pointer().clone(),
+            out_raw_p.device_pointer().clone(),
+            value(scale), value(qgs), value(QLEN as i32), value(KVLEN as i32), value(0i32),
+            value(num_q_blocks), value(num_head_groups),
+            value(1i32), value(2i32), value(1i32),
+        )
+        .generics(generics.clone()).grid((grid_x, 1, 1)).sync_on(&stream)?;
+    }
+
     let truth = out_raw.to_host_vec().sync_on(&stream)?;
     let chk = out_chk.to_host_vec().sync_on(&stream)?;
     let mut chk_bad = 0usize;
@@ -702,5 +734,28 @@ fn fmha_prefill_lpt_checked_matches_and_fixes_strides() -> Result<()> {
         }
     }
     assert_eq!(chk_bad, 0, "checked LPT diverges from contiguous truth: {chk_bad}");
+
+    // raw-kernel bug confirmation
+    let raw_c = out_raw_c.to_host_vec().sync_on(&stream)?;
+    let raw_p = out_raw_p.to_host_vec().sync_on(&stream)?;
+    let mut raw_c_bad = 0usize;
+    let mut raw_p_bad = 0usize;
+    for i in 0..truth.len() {
+        if truth[i].to_f32() != raw_c.get(i).map(|v| v.to_f32()).unwrap_or(f32::NAN) {
+            raw_c_bad += 1;
+        }
+        if truth[i].to_f32() != raw_p[i].to_f32() {
+            raw_p_bad += 1;
+        }
+    }
+    eprintln!(
+        "raw resurrected: contiguous mismatches={raw_c_bad}, padded mismatches={raw_p_bad} of {}",
+        truth.len()
+    );
+    assert_eq!(raw_c_bad, 0, "raw kernel must match truth on a contiguous cache");
+    assert!(
+        raw_p_bad > 0,
+        "raw kernel unexpectedly CORRECT on padded cache — stride bug not reproduced"
+    );
     Ok(())
 }
