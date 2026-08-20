@@ -914,6 +914,33 @@ material timing win means the checked lowering cost is amortized at these long
 contexts; the resource result alone is not grounds to expand the unsafe
 surface.
 
+## Long-prefill operation attribution
+
+Date: 2026-08-20
+
+Synchronized operation profiles used the same Qwen3-32B shipping LPT profile
+as the checked/twin test. Each cell discarded JIT compilation and one warmup.
+The full operation table is preserved in
+`benchmarks/results/b200_long_prefill_attribution_20260819/op_profiles.csv`.
+
+| pp | prefill (ms) | Attention | MatMulSlice | MatMul | fused/other |
+|---:|---:|---:|---:|---:|---:|
+| 16384 | 1265.653 | 35.83% | 33.83% | 19.19% | 11.15% |
+| 32768 | 3495.424 | 52.08% | 25.31% | 14.38% | 8.23% |
+
+The 32K Nsight Systems trace isolated the measured request on its CUDA stream:
+902 kernel launches over 3515.691 ms. LPT attention consumed 1829.315 ms
+(52.03%, 64 launches averaging 28.583 ms), cuBLAS kernels consumed 1387.904 ms
+(39.48%), and other grout kernels consumed 281.156 ms (8.00%). The union of
+inter-kernel idle intervals was only 18.332 ms (0.52%); all but 0.159 ms was a
+single first-GEMM startup gap. Launch or scheduling overhead is therefore not
+a material source of the long-prefill deficit.
+
+Non-attention compute is nevertheless 47.5% of the 32K GPU timeline. Without a
+matched vLLM operation trace, the current end-to-end gap cannot be assigned
+entirely to attention. The backend ceiling comparison below is needed to bound
+the attention-specific headroom.
+
 ## Raw-LPT resurrection audit (2026-08-20, 5090)
 
 Question: is the checked LPT kernel slower than the deleted unsafe one —

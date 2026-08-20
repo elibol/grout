@@ -1,0 +1,14 @@
+metric,value,unit
+measured_request_wall,3515.691,ms
+kernel_launches,902,count
+lpt_attention,1829.315,ms
+lpt_attention_share,52.033,percent
+lpt_attention_launches,64,count
+lpt_attention_mean,28583.052,us
+cublas_kernels,1387.904,ms
+cublas_share,39.477,percent
+other_grout_kernels,281.156,ms
+other_grout_share,7.997,percent
+inter_kernel_idle,18.332,ms
+inter_kernel_idle_share,0.521,percent
+largest_idle_gap,18.173,ms
