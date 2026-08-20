@@ -5688,8 +5688,39 @@ impl Qwen3Engine {
                 let default_gqa_lpt =
                     q_len >= 2048 && query_group_size > 1 && device_is_sm100(ctx.get_device_id());
                 let use_gqa_lpt = env_bool_or("GROUT_FMHA_PREFILL_GQA_LPT", default_gqa_lpt);
+                let use_trtllm = q_len > 1
+                    && matches!(position_input, PositionInput::Host(_))
+                    && crate::trtllm_attn::enabled();
                 let use_gqa = env_bool_or("GROUT_FMHA_PREFILL_GQA", false);
                 let use_prefill_kernel = env_bool_or("GROUT_FMHA_PREFILL", true);
+                if use_trtllm {
+                    // trtllm-gen CUDA C++ backend (opt-in, sm_100): dense
+                    // ragged context attention straight on grout's
+                    // [kv_heads, max_seq, D] caches — no repacking. Falls
+                    // back to the cuTile kernel on any launch error.
+                    let head_dim = self.cfg.head_dim;
+                    let kv_head_stride = self.max_seq_len * head_dim;
+                    match crate::trtllm_attn::ragged_context_f16(
+                        out.device_pointer().cu_deviceptr(),
+                        q.device_pointer().cu_deviceptr(),
+                        k_cache.device_pointer().cu_deviceptr(),
+                        v_cache.device_pointer().cu_deviceptr(),
+                        q_len,
+                        kv_len as usize,
+                        self.cfg.num_attention_heads,
+                        self.cfg.num_key_value_heads,
+                        head_dim,
+                        kv_head_stride,
+                        qk_scale,
+                    ) {
+                        Ok(()) => return Ok(out),
+                        Err(e) => {
+                            eprintln!(
+                                "trtllm attention failed, falling back to cuTile LPT: {e:#}"
+                            );
+                        }
+                    }
+                }
                 if use_gqa_lpt {
                     let qgs = query_group_size as usize;
                     let group_env = env_usize_or("GROUT_FMHA_PREFILL_GQA_GROUP", 0);

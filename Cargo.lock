@@ -690,6 +690,7 @@ dependencies = [
  "cudarc",
  "cutile",
  "cutile-compiler",
+ "libloading 0.8.9",
  "memmap2",
  "rand",
  "rayon",
