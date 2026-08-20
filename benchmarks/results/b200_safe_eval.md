@@ -882,6 +882,38 @@ not load `libnuma.so.1`; this validation required only grout and vLLM. The
 remaining 32K gap is the previously identified within-tcgen05 long-context
 attention-efficiency limitation.
 
+## Checked-vs-unchecked LPT on B200
+
+Date: 2026-08-19
+
+This phase used grout `3b07fd2`, cutile-rs `e90f9b8`, Qwen3-32B, and default
+B200 clocks. Fresh release binaries were built, including the feature-gated
+`grout_bench`, and all seven GPU kernel tests passed. The historical raw LPT
+test again produced 32,768 mismatches out of 65,536 values on the padded cache
+and zero on the contiguous cache.
+
+Three rounds used checked/twin, twin/checked, checked/twin order at each
+length. Each process discarded JIT compilation and one additional warmup,
+then averaged three measured requests with 36 generated tokens. The twin was
+selected only through `GROUT_FMHA_PREFILL_LPT_UNSAFE_TWIN=1`; all other knobs
+matched the shipping sm_100 long profile. Generated output was byte-identical
+across every arm and round.
+
+| pp | checked / twin prefill (ms) | twin delta | checked / twin e2e (ms) | twin delta |
+|---:|---:|---:|---:|---:|
+| 16384 | **1261.838** / 1263.682 | +0.146% | **1737.731** / 1738.680 | +0.055% |
+| 32768 | 3494.702 / **3477.748** | -0.485% | 3996.190 / **3982.200** | -0.350% |
+
+**Decision: the checked kernel stays.** The exact-body unchecked twin does not
+reach the greater-than-2% shipping threshold at either length.
+
+Fresh cubins at `BM=16`, `BN=128`, group 4, mask split on show a large static
+resource difference: checked is `REG=128`, `STACK=1232`, 904 static LDL/STL;
+the twin is `REG=128`, `STACK=0`, zero LDL/STL. The spill-free twin's lack of a
+material timing win means the checked lowering cost is amortized at these long
+contexts; the resource result alone is not grounds to expand the unsafe
+surface.
+
 ## Raw-LPT resurrection audit (2026-08-20, 5090)
 
 Question: is the checked LPT kernel slower than the deleted unsafe one —
