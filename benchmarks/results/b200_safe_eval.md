@@ -1009,6 +1009,27 @@ amounts exceed the current same-session grout-vLLM e2e gaps of 64.0 ms and
 efficiency; launch overhead is not responsible, and tcgen05-class kernel work
 has enough measured headroom to matter.
 
+## Final canonical long-prefill sweep
+
+Date: 2026-08-20
+
+The fresh canonical bundle is `benchmarks/results/sweep/20260820_012214`.
+Both engines used default clocks and three measured requests after three
+warmups; vLLM reported that TRTLLM prefill attention was auto-selected. SGLang
+was attempted by the standard wrapper but its extension still cannot load
+`libnuma.so.1`, so only the requested grout and vLLM arms are reported.
+
+| pp | grout e2e (ms) | vLLM e2e (ms) | grout gap | grout prefill / vLLM TTFT (ms) |
+|---:|---:|---:|---:|---:|
+| 16384 | 1627.65 | **1558.70** | **+4.42%** | 1149.76 / 1068.95 |
+| 32768 | 3499.47 | **3102.36** | **+12.80%** | 2993.85 / 2596.78 |
+
+The e2e gaps are 69.0 ms and 397.1 ms. The 32K direct prefill difference is
+also 397.1 ms, nearly identical to the 395.6 ms attention-only headroom from
+the trtllm-gen ceiling. This same-session result confirms the attribution:
+closing the long-prefill gap is an attention-kernel efficiency project, not a
+launch-overhead, safety-check, or non-attention dispatch problem.
+
 ## Raw-LPT resurrection audit (2026-08-20, 5090)
 
 Question: is the checked LPT kernel slower than the deleted unsafe one —
