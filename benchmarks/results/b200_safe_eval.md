@@ -1110,3 +1110,23 @@ TRTLLM prefill attention.
 The corresponding direct grout prefill medians are 16.45, 16.47, 29.19, and
 113.60 ms. Baseline `prefill_ms` is TTFT rather than a pure prefill timer, so
 the table uses the cross-engine e2e metric for comparisons.
+
+## Canonical paper sweep: decode
+
+Date: 2026-08-20
+
+The clean B200/Qwen3-32B decode bundle is
+`benchmarks/results/sweep/20260820_152625_b200_32b_canonical_tg`. It used the
+same engine/compiler revisions and default clocks as the canonical prefill
+bundle. Each pp=18 cell contains 10 fixed-length measured requests after 3
+warmups; EOS termination was disabled.
+
+| tg | grout request tok/s | vLLM request tok/s | grout vs vLLM | SGLang request tok/s |
+|---:|---:|---:|---:|---:|
+| 36 | **78.4** | 77.9 | +0.63% | 74.9 |
+| 128 | **79.0** | 77.7 | +1.66% | 76.6 |
+| 512 | **79.4** | 77.7 | +2.23% | 77.0 |
+
+The cross-tg linear fit gives decode rates of 79.5 tok/s for grout, 77.7 for
+vLLM, and 77.2 for SGLang. Grout's direct phase timers report 81.3, 79.8, and
+79.6 tok/s at tg 36, 128, and 512 respectively.
