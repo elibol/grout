@@ -918,25 +918,26 @@ surface.
 
 Date: 2026-08-20
 
-Synchronized operation profiles used the same Qwen3-32B shipping LPT profile
-as the checked/twin test. Each cell discarded JIT compilation and one warmup.
+Synchronized operation profiles used the canonical Qwen3-32B LPT profile:
+`BM=16`, `BN=128`, group 8, latency 2, and swizzle 8. Each cell discarded JIT
+compilation and one warmup. An initial group-4 capture was superseded after the
+profile value `GROUP=0` was confirmed to resolve to all eight query heads.
 The full operation table is preserved in
 `benchmarks/results/b200_long_prefill_attribution_20260819/op_profiles.csv`.
 
 | pp | prefill (ms) | Attention | MatMulSlice | MatMul | fused/other |
 |---:|---:|---:|---:|---:|---:|
-| 16384 | 1265.653 | 35.83% | 33.83% | 19.19% | 11.15% |
-| 32768 | 3495.424 | 52.08% | 25.31% | 14.38% | 8.23% |
+| 16384 | 1160.663 | 29.92% | 36.92% | 20.97% | 12.19% |
+| 32768 | 2988.847 | 45.80% | 28.56% | 16.28% | 9.36% |
 
 The 32K Nsight Systems trace isolated the measured request on its CUDA stream:
-902 kernel launches over 3515.691 ms. LPT attention consumed 1829.315 ms
-(52.03%, 64 launches averaging 28.583 ms), cuBLAS kernels consumed 1387.904 ms
-(39.48%), and other grout kernels consumed 281.156 ms (8.00%). The union of
-inter-kernel idle intervals was only 18.332 ms (0.52%); all but 0.159 ms was a
-single first-GEMM startup gap. Launch or scheduling overhead is therefore not
-a material source of the long-prefill deficit.
+902 kernel launches over 2994.670 ms. LPT attention consumed 1381.399 ms
+(46.13%, 64 launches averaging 21.584 ms), cuBLAS kernels consumed 1340.391 ms
+(44.76%), and other grout kernels consumed 273.714 ms (9.14%). The union of
+inter-kernel idle intervals was only 0.167 ms (0.006%). Launch or scheduling
+overhead is therefore not a material source of the long-prefill deficit.
 
-Non-attention compute is nevertheless 47.5% of the 32K GPU timeline. Without a
+Non-attention compute is 53.9% of the 32K GPU timeline. Without a
 matched vLLM operation trace, the current end-to-end gap cannot be assigned
 entirely to attention. The backend ceiling comparison below is needed to bound
 the attention-specific headroom.

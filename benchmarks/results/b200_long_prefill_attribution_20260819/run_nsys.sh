@@ -17,13 +17,13 @@ nsys profile \
     --cpuctxsw=none \
     --force-overwrite=true \
     --stats=false \
-    --output="$OUT/pp32768" \
+    --output="$OUT/pp32768_group8" \
     /usr/bin/env \
         GROUT_CUDA_GRAPH_DECODE=1 \
         GROUT_FMHA_PREFILL_GQA_LPT=1 \
         GROUT_ATTN_BM_PREFILL=16 \
         GROUT_ATTN_BN_PREFILL=128 \
-        GROUT_FMHA_PREFILL_GQA_GROUP=4 \
+        GROUT_FMHA_PREFILL_GQA_GROUP=8 \
         GROUT_FMHA_PREFILL_LPT_SWIZZLE=8 \
         GROUT_FMHA_PREFILL_LPT_SCHED=1 \
         GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=1 \
@@ -38,13 +38,18 @@ nsys profile \
         --reps 1 \
         --warmup-reps 0 \
         --quiet \
-        >"$OUT/logs/nsys_pp32768.log" 2>&1
+        >"$OUT/logs/nsys_pp32768_group8.log" 2>&1
 
-nsys stats \
-    --force-export=true \
-    --report cuda_gpu_kern_sum \
-    --format csv \
-    --output "$OUT/pp32768_kern" \
-    "$OUT/pp32768.nsys-rep" \
-    >/dev/null
-mv -f "$OUT/pp32768_kern_cuda_gpu_kern_sum.csv" "$OUT/pp32768_kern.csv"
+if [[ -f "$OUT/pp32768_group8.nsys-rep" ]]; then
+    nsys stats \
+        --force-export=true \
+        --report cuda_gpu_kern_sum \
+        --format csv \
+        --output "$OUT/pp32768_group8_kern" \
+        "$OUT/pp32768_group8.nsys-rep" \
+        >/dev/null
+    mv -f "$OUT/pp32768_group8_kern_cuda_gpu_kern_sum.csv" \
+        "$OUT/pp32768_group8_kern.csv"
+else
+    echo "Nsight importer unavailable; raw pp32768_group8.qdstrm retained" >&2
+fi
