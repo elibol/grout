@@ -841,3 +841,43 @@ exact: unmasked lanes add 0.0). Default flipped to on. B200
 validation pending; the mask work is arch-independent register
 elementwise, so a comparable win is expected at 16K/32K there
 (prior gap vs vLLM: +5.8%/+14.4%).
+
+## LPT mask-split validation on B200
+
+Date: 2026-08-19
+
+This validation used grout `b93bb0d`, cutile-rs `e90f9b8`, Qwen3-32B, and
+default B200 clocks. Both release binaries were rebuilt, including the
+feature-gated `grout_bench`, and all seven GPU kernel tests passed.
+
+### Paired default A/B
+
+Three rounds used old/new, new/old, old/new order at each length. Each process
+discarded JIT compilation and one additional warmup, then averaged three
+measured requests with 36 generated tokens. The old arm explicitly set
+`GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=0`; the new arm left it unset, selecting the
+new default. Generated output was byte-identical across every arm and round.
+
+| pp | old / new prefill (ms) | prefill delta | old / new e2e (ms) | e2e delta |
+|---:|---:|---:|---:|---:|
+| 16384 | 1170.086 / **1154.499** | **-1.332%** | 1645.321 / **1631.896** | **-0.816%** |
+| 32768 | 3051.327 / **2977.738** | **-2.412%** | 3548.429 / **3474.549** | **-2.082%** |
+
+The B200 win is smaller than the 5090 result at 16K and approaches it at 32K.
+The sm_100 long-context profile now enables mask splitting explicitly.
+
+### Fresh grout-vLLM sweep
+
+The fresh canonical bundle is `benchmarks/results/sweep/20260819_221611`.
+Values below are same-session medians over three requests.
+
+| pp | grout e2e (ms) | vLLM e2e (ms) | grout gap | prior gap |
+|---:|---:|---:|---:|---:|
+| 16384 | 1630.70 | **1566.66** | **+4.09%** | +5.83% |
+| 32768 | 3488.40 | **3131.21** | **+11.41%** | +14.39% |
+
+The gap narrowed by 1.74 percentage points at 16K and 2.98 points at 32K.
+SGLang was attempted by the standard wrapper but its sm_100 extension could
+not load `libnuma.so.1`; this validation required only grout and vLLM. The
+remaining 32K gap is the previously identified within-tcgen05 long-context
+attention-efficiency limitation.

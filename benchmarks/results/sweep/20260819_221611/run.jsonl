@@ -1,0 +1,12 @@
+{"engine":"grout","variant":"default","pp":16384,"tg":36,"rep":0,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1163.823,"decode_ms":471.640,"e2e_ms":1635.475}
+{"engine":"grout","variant":"default","pp":16384,"tg":36,"rep":1,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1150.954,"decode_ms":476.138,"e2e_ms":1627.109}
+{"engine":"grout","variant":"default","pp":16384,"tg":36,"rep":2,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1159.446,"decode_ms":471.237,"e2e_ms":1630.698}
+{"engine":"grout","variant":"default","pp":32768,"tg":36,"rep":0,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2988.487,"decode_ms":499.888,"e2e_ms":3488.396}
+{"engine":"grout","variant":"default","pp":32768,"tg":36,"rep":1,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2984.657,"decode_ms":495.768,"e2e_ms":3480.446}
+{"engine":"grout","variant":"default","pp":32768,"tg":36,"rep":2,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2988.838,"decode_ms":506.429,"e2e_ms":3495.287}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 16384, "tg": 36, "rep": 0, "prompt_tokens": 16384, "gen_tokens": 36, "e2e_ms": 1566.6587769956095, "prefill_ms": 1074.5487940002931}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 16384, "tg": 36, "rep": 1, "prompt_tokens": 16384, "gen_tokens": 36, "e2e_ms": 1565.9234760023537, "prefill_ms": 1086.5450860001147}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 16384, "tg": 36, "rep": 2, "prompt_tokens": 16384, "gen_tokens": 36, "e2e_ms": 1567.4959120005951, "prefill_ms": 1084.5957540004747}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 32768, "tg": 36, "rep": 0, "prompt_tokens": 32768, "gen_tokens": 36, "e2e_ms": 3137.653317004151, "prefill_ms": 2632.6220870032557}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 32768, "tg": 36, "rep": 1, "prompt_tokens": 32768, "gen_tokens": 36, "e2e_ms": 3129.389772002469, "prefill_ms": 2628.4716410009423}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 32768, "tg": 36, "rep": 2, "prompt_tokens": 32768, "gen_tokens": 36, "e2e_ms": 3131.211751999217, "prefill_ms": 2631.06680400233}
