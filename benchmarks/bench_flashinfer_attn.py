@@ -48,23 +48,38 @@ def bench(fn, warmup=10, iters=50):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lens", type=int, nargs="+", default=[512, 2048, 8192])
+    ap.add_argument("--num-qo-heads", type=int, default=NUM_QO_HEADS)
+    ap.add_argument("--num-kv-heads", type=int, default=NUM_KV_HEADS)
+    ap.add_argument("--head-dim", type=int, default=HEAD_DIM)
+    ap.add_argument("--prefill-only", action="store_true")
+    ap.add_argument("--backend", choices=["auto", "fa2", "fa3"], default="auto")
     args = ap.parse_args()
     dev = torch.device("cuda")
     print(f"GPU: {torch.cuda.get_device_name(dev)}, flashinfer {flashinfer.__version__}")
-    print(f"shapes: H_qo={NUM_QO_HEADS} H_kv={NUM_KV_HEADS} D={HEAD_DIM} {DTYPE}")
+    print(
+        f"shapes: H_qo={args.num_qo_heads} H_kv={args.num_kv_heads} "
+        f"D={args.head_dim} {DTYPE} backend={args.backend}"
+    )
 
     print("\n== prefill: single_prefill_with_kv_cache(causal=True), qo_len == kv_len ==")
     for n in args.lens:
-        q = torch.randn(n, NUM_QO_HEADS, HEAD_DIM, dtype=DTYPE, device=dev)
-        k = torch.randn(n, NUM_KV_HEADS, HEAD_DIM, dtype=DTYPE, device=dev)
+        q = torch.randn(n, args.num_qo_heads, args.head_dim, dtype=DTYPE, device=dev)
+        k = torch.randn(n, args.num_kv_heads, args.head_dim, dtype=DTYPE, device=dev)
         v = torch.randn_like(k)
-        us = bench(lambda: flashinfer.single_prefill_with_kv_cache(q, k, v, causal=True))
+        us = bench(
+            lambda: flashinfer.single_prefill_with_kv_cache(
+                q, k, v, causal=True, backend=args.backend
+            )
+        )
         print(f"  len={n:6d}: {us:10.1f} us/call")
+
+    if args.prefill_only:
+        return
 
     print("\n== decode: single_decode_with_kv_cache(use_tensor_cores=True) ==")
     for n in args.lens:
-        q = torch.randn(NUM_QO_HEADS, HEAD_DIM, dtype=DTYPE, device=dev)
-        k = torch.randn(n, NUM_KV_HEADS, HEAD_DIM, dtype=DTYPE, device=dev)
+        q = torch.randn(args.num_qo_heads, args.head_dim, dtype=DTYPE, device=dev)
+        k = torch.randn(n, args.num_kv_heads, args.head_dim, dtype=DTYPE, device=dev)
         v = torch.randn_like(k)
         us = bench(
             lambda: flashinfer.single_decode_with_kv_cache(q, k, v, use_tensor_cores=True)

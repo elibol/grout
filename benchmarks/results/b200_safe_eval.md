@@ -980,6 +980,35 @@ These sub-quarter-percent mixed results are parity, not tuning wins. The
 shipping long profile remains `BM=16`, `BN=128`, group 0/full-8, latency 2,
 swizzle 8, schedule 1, mask split enabled, and occupancy 2.
 
+## Long-prefill attention ceiling
+
+Date: 2026-08-20
+
+The comparison uses the exact Qwen3-32B layer shape (`Hq=64`, `Hkv=8`,
+`D=128`, FP16, causal, `q_len=kv_len`). FlashInfer and trtllm-gen numbers are
+CUDA-event medians after 10 warmups and 50 measured calls. Grout is the
+synchronized Attention row; its 32K Nsight average is also shown to bound
+method skew.
+
+| backend | 16K us/layer | vs grout | 32K us/layer | vs grout |
+|---|---:|---:|---:|---:|
+| grout checked LPT | 5425.7 | - | 21390.7 | - |
+| grout checked LPT (Nsight) | - | - | 21584.4 | +0.9% vs sync |
+| FlashInfer FA2 | 10749.5 | +98.1% | 42029.1 | +96.5% |
+| trtllm-gen, page 16 | **3885.7** | **-28.4%** | **15209.3** | **-28.9%** |
+
+The installed trtllm-gen artifact contains page-size-16 context kernels only.
+The requested one-page dense form fails before timing with a missing-kernel
+diagnostic for `numTokensPerPage=16384`; page 16 is the production-supported
+fallback. PDL enabled and disabled results agree within 0.1%.
+
+Replacing only grout's attention time with the measured trtllm-gen ceiling
+would save about 98.6 ms at 16K and 395.6 ms at 32K over 64 layers. Those
+amounts exceed the current same-session grout-vLLM e2e gaps of 64.0 ms and
+357.2 ms. Therefore the residual gap is fully explainable by attention-kernel
+efficiency; launch overhead is not responsible, and tcgen05-class kernel work
+has enough measured headroom to matter.
+
 ## Raw-LPT resurrection audit (2026-08-20, 5090)
 
 Question: is the checked LPT kernel slower than the deleted unsafe one —

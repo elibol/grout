@@ -1,0 +1,10 @@
+backend,kv_len,page_size,median_us,method,notes
+grout_checked_lpt,16384,na,5425.67,sync_op,64-call average
+grout_checked_lpt,32768,na,21390.70,sync_op,64-call average
+grout_checked_lpt,32768,na,21584.36,nsys,64-launch average
+flashinfer_fa2,16384,dense,10749.5,cuda_event,auto selects fa2 on sm_100
+flashinfer_fa2,32768,dense,42029.1,cuda_event,auto selects fa2 on sm_100
+trtllm_gen,16384,16,3885.7,cuda_event,pdl enabled
+trtllm_gen,32768,16,15209.3,cuda_event,pdl enabled
+trtllm_gen,16384,16,3888.8,cuda_event,pdl disabled
+trtllm_gen,32768,16,15211.8,cuda_event,pdl disabled
