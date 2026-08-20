@@ -35,12 +35,29 @@ type RaggedFn = unsafe extern "C" fn(
     enable_pdl: i32,
     stream: *mut core::ffi::c_void,
 ) -> i32;
+type PagedFn = unsafe extern "C" fn(
+    out: *mut core::ffi::c_void,
+    q: *mut core::ffi::c_void,
+    k: *mut core::ffi::c_void,
+    v: *mut core::ffi::c_void,
+    q_len: i64,
+    kv_len: i64,
+    max_seq: i64,
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    head_dim: i64,
+    bmm1_scale: f32,
+    enable_pdl: i32,
+    repack: i32,
+    stream: *mut core::ffi::c_void,
+) -> i32;
 type LastErrFn = unsafe extern "C" fn() -> *const core::ffi::c_char;
 type SyncFn = unsafe extern "C" fn() -> i32;
 
 struct Shim {
     _lib: Library,
     ragged: libloading::os::unix::Symbol<RaggedFn>,
+    paged: libloading::os::unix::Symbol<PagedFn>,
     last_err: libloading::os::unix::Symbol<LastErrFn>,
     sync: libloading::os::unix::Symbol<SyncFn>,
 }
@@ -78,14 +95,23 @@ fn shim() -> Option<&'static Shim> {
                     return None;
                 }
             };
+            let paged: Symbol<PagedFn> = match lib.get(b"grout_trtllm_paged_context_f16") {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("symbol missing in {path}: {e}");
+                    return None;
+                }
+            };
             let last_err: Symbol<LastErrFn> = lib.get(b"grout_trtllm_last_error").ok()?;
             let sync: Symbol<SyncFn> = lib.get(b"grout_trtllm_sync").ok()?;
             let ragged = ragged.into_raw();
+            let paged = paged.into_raw();
             let last_err = last_err.into_raw();
             let sync = sync.into_raw();
             Some(Shim {
                 _lib: lib,
                 ragged,
+                paged,
                 last_err,
                 sync,
             })
@@ -99,50 +125,78 @@ pub fn enabled() -> bool {
     shim().is_some()
 }
 
-/// Launch the trtllm-gen ragged context attention on dense grout buffers.
-/// All strides in elements. Brackets the call with device-wide syncs (v1
-/// ordering contract; see module docs).
+/// Launch trtllm-gen context attention on dense grout buffers.
+///
+/// Mode selection via GROUT_TRTLLM_MODE: "paged" (default — page-16
+/// kernels, the family present in shipping artifacts and used by vLLM;
+/// the dense cache is presented zero-copy as a strided HND paged pool
+/// with an identity block table) or "ragged" (SeparateQkv kernels, not in
+/// all artifacts). GROUT_TRTLLM_REPACK=1 additionally repacks K/V into
+/// packed pools in case the zero-copy strides trip a TMA constraint.
+/// Brackets the call with device-wide syncs (v1 ordering contract).
 #[allow(clippy::too_many_arguments)]
-pub fn ragged_context_f16(
+pub fn context_f16(
     out: u64,
     q: u64,
     k: u64,
     v: u64,
     q_len: usize,
     kv_len: usize,
+    max_seq: usize,
     num_q_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    kv_head_stride: usize,
     qk_scale: f32,
 ) -> Result<()> {
     let Some(s) = shim() else {
         bail!("trtllm shim not loaded");
     };
+    let use_ragged = std::env::var("GROUT_TRTLLM_MODE").ok().as_deref() == Some("ragged");
+    let repack = std::env::var("GROUT_TRTLLM_REPACK").ok().as_deref() == Some("1");
+    let kv_head_stride = max_seq * head_dim;
     // SAFETY: pointers come from live device tensors owned by the caller;
     // the sync bracket orders the foreign launch against grout's stream.
     unsafe {
         if (s.sync)() != 0 {
             bail!("cuda sync before trtllm launch failed");
         }
-        let rc = (s.ragged)(
-            out as *mut _,
-            q as *mut _,
-            k as *mut _,
-            v as *mut _,
-            q_len as i64,
-            kv_len as i64,
-            num_q_heads as i64,
-            num_kv_heads as i64,
-            head_dim as i64,
-            head_dim as i64,
-            kv_head_stride as i64,
-            head_dim as i64,
-            kv_head_stride as i64,
-            qk_scale,
-            0,
-            core::ptr::null_mut(),
-        );
+        let rc = if use_ragged {
+            (s.ragged)(
+                out as *mut _,
+                q as *mut _,
+                k as *mut _,
+                v as *mut _,
+                q_len as i64,
+                kv_len as i64,
+                num_q_heads as i64,
+                num_kv_heads as i64,
+                head_dim as i64,
+                head_dim as i64,
+                kv_head_stride as i64,
+                head_dim as i64,
+                kv_head_stride as i64,
+                qk_scale,
+                0,
+                core::ptr::null_mut(),
+            )
+        } else {
+            (s.paged)(
+                out as *mut _,
+                q as *mut _,
+                k as *mut _,
+                v as *mut _,
+                q_len as i64,
+                kv_len as i64,
+                max_seq as i64,
+                num_q_heads as i64,
+                num_kv_heads as i64,
+                head_dim as i64,
+                qk_scale,
+                0,
+                repack as i32,
+                core::ptr::null_mut(),
+            )
+        };
         if rc != 0 {
             let msg = CStr::from_ptr((s.last_err)()).to_string_lossy().to_string();
             bail!("trtllm ragged context attention failed (rc={rc}): {msg}");

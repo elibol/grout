@@ -5699,18 +5699,17 @@ impl Qwen3Engine {
                     // [kv_heads, max_seq, D] caches — no repacking. Falls
                     // back to the cuTile kernel on any launch error.
                     let head_dim = self.cfg.head_dim;
-                    let kv_head_stride = self.max_seq_len * head_dim;
-                    match crate::trtllm_attn::ragged_context_f16(
+                    match crate::trtllm_attn::context_f16(
                         out.device_pointer().cu_deviceptr(),
                         q.device_pointer().cu_deviceptr(),
                         k_cache.device_pointer().cu_deviceptr(),
                         v_cache.device_pointer().cu_deviceptr(),
                         q_len,
                         kv_len as usize,
+                        self.max_seq_len,
                         self.cfg.num_attention_heads,
                         self.cfg.num_key_value_heads,
                         head_dim,
-                        kv_head_stride,
                         qk_scale,
                     ) {
                         Ok(()) => return Ok(out),
