@@ -89,7 +89,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${GROUT_ATTN_BN_DECODE_PP_8192:=64}"
 : "${GROUT_FMHA_NUM_KV_SPLITS_PP_8192:=32}"
 
-# Long-prefill LPT winners from the B200 Qwen3-32B paired retune. BN=128 versus
+# Long-prefill LPT winners from the B200 Qwen3-32B paired retune. GROUP=0
+# resolves to the full query group (8 for Qwen3-32B) and beat group 4 by
+# 9.5%/17.0% at pp=16384/32768. BN=128 versus
 # BN=64 reduced synchronized Attention by 2.9%/2.3% and e2e prefill by
 # 1.3%/1.3% at pp=16384/32768. BM=8, swizzle=4, and sched=0 all lost. Splitting
 # the causal mask prefix reduced paired e2e by 0.8%/2.1% at pp=16384/32768.

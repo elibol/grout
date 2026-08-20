@@ -1,0 +1,11 @@
+==== fmha_prefill_gqa_lpt_checked_bm16_bn128_group8.cubin
+REG=128
+STACK=200
+SHARED=115972
+LDL_STL=27
+
+==== fmha_prefill_gqa_lpt_unchecked_twin_bm16_bn128_group8.cubin
+REG=128
+STACK=0
+SHARED=115972
+LDL_STL=0

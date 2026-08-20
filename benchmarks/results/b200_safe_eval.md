@@ -914,6 +914,24 @@ material timing win means the checked lowering cost is amortized at these long
 contexts; the resource result alone is not grounds to expand the unsafe
 surface.
 
+### Canonical group correction
+
+The initial decision harness above forced group 4, but the canonical sm_100
+profile exports group 0, which resolves to all eight query heads for Qwen3-32B.
+The decision test was therefore repeated at group 8 with the same three-round
+checked/twin, twin/checked, checked/twin order. All generated text remained
+identical.
+
+| pp | checked / twin prefill (ms) | twin delta | checked / twin e2e (ms) | twin delta |
+|---:|---:|---:|---:|---:|
+| 16384 | 1154.122 / **1152.532** | -0.138% | 1738.051 / **1736.621** | -0.082% |
+| 32768 | 2994.462 / **2992.722** | -0.058% | 3689.999 / **3681.731** | -0.224% |
+
+**The corrected decision is unchanged: checked stays.** At the canonical
+group-8 shape, checked is `REG=128`, `STACK=200`, and 27 static LDL/STL; the
+twin is `REG=128`, `STACK=0`, and zero LDL/STL. Runtime deltas remain far below
+the greater-than-2% threshold.
+
 ## Long-prefill operation attribution
 
 Date: 2026-08-20
@@ -941,6 +959,26 @@ Non-attention compute is 53.9% of the 32K GPU timeline. Without a
 matched vLLM operation trace, the current end-to-end gap cannot be assigned
 entirely to attention. The backend ceiling comparison below is needed to bound
 the attention-specific headroom.
+
+## LPT retune with mask split enabled
+
+Date: 2026-08-20
+
+The canonical group-8 shape first received a one-request screen at both long
+lengths. `BN=64/256` lost at both lengths. Latency 3 and swizzle 16 were the only
+32K screen improvements and advanced to paired confirmation; latency 4 and
+swizzle 4 did not. The requested group-4/group-2 screen was also run: group 2
+was 123%/180% slower than group 4 at 16K/32K, while group 4 itself lost to the
+canonical group 8 by 9.52%/17.03% in a three-round paired comparison.
+
+| pp | default latency 2 (ms) | latency 3 (ms) | delta | default swizzle 8 (ms) | swizzle 16 (ms) | delta |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16384 | 1158.220 | 1159.108 | +0.077% | 1157.537 | **1156.607** | -0.080% |
+| 32768 | 2998.032 | **2991.374** | -0.222% | **2998.193** | 2998.881 | +0.023% |
+
+These sub-quarter-percent mixed results are parity, not tuning wins. The
+shipping long profile remains `BM=16`, `BN=128`, group 0/full-8, latency 2,
+swizzle 8, schedule 1, mask split enabled, and occupancy 2.
 
 ## Raw-LPT resurrection audit (2026-08-20, 5090)
 
