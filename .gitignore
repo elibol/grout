@@ -5,3 +5,4 @@ benchmarks/results/
 *.nsys-rep
 *.sqlite
 *.qdstrm
+benchmarks/trtllm_shim/libgrout_trtllm.so

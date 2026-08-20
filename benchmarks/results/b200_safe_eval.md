@@ -1054,3 +1054,35 @@ should we ship one less safe kernel? Evidence:
    16K/32K on the 5090 — register cliff. Note vLLM's B200 long-context
    numbers come from trtllm-gen/FA3 CUDA backends, not these Triton
    kernels, so no Triton-shape change can close that gap.
+
+## Opt-in trtllm-gen backend validation
+
+Date: 2026-08-20
+
+- grout: `69fb4ed5657dc4e239d0e7686aa7de6e4a89d06d`
+- cutile-rs: `e90f9b8f1c24d0eb9528741395edda02bf441361`
+- FlashInfer checkout: `d527621951244b8be4dd412b1a6729295697f3a7`
+- trtllm-gen artifact family: `158f6fa11ef139a098cfddcdddce73ca99d164ad`
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B, default clocks
+
+Both release binaries were rebuilt, including the feature-gated
+`grout_bench`. The shim builds after adding FlashInfer's CUTLASS include paths
+and deriving `TLLM_GEN_FMHA_METAINFO_HASH` from the artifact manifest. The
+launcher body was not changed.
+
+The pp=2048 smoke exposed an artifact coverage gap. The runner requested an
+FP16 causal `SeparateQkv` context kernel (`qkvLayout=0`,
+`numTokensPerPage=0`, `Hqk=Hv=128`, persistent scheduler), but the artifact
+does not contain that kernel. It returned the explicit `Missing TRTLLM-GEN
+kernel ragged attention` diagnostic and grout correctly fell back to checked
+cuTile LPT on all 193 attempted prefill calls. The artifact contains paged FP16
+context kernels and separate-QKV BF16 context kernels, but no separate-QKV
+FP16 context kernel.
+
+The default and fallback continuations were byte-identical, both with SHA-256
+`407673405ccd7be79b119811ced911cba08b12f1ea59758a3bc676fd8d68cf74`;
+there were no launch errors after fallback, NaNs, or incoherent text. This does
+not validate trtllm numerical parity because its kernel never launched.
+Consequently the paired long-prefill trtllm A/B and canonical trtllm sweep arm
+were skipped rather than reporting fallback timings as backend results. A
+matching FP16 `SeparateQkv` causal context artifact is required to resume them.

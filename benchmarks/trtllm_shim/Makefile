@@ -9,6 +9,7 @@
 #                   find it with:
 #                     python -c "from flashinfer.jit.cubin_loader import FLASHINFER_CUBIN_DIR as d; print(d)"
 #                   then append the trtllm-gen fmha artifact subdirectory.
+#   CUTLASS_DIR     CUTLASS checkout, default FLASHINFER_DIR/3rdparty/cutlass
 #   CUDA_HOME       CUDA toolkit (needs nvcc + driver stubs), default /usr/local/cuda
 #
 # Usage:
@@ -20,7 +21,15 @@
 
 CUDA_HOME ?= /usr/local/cuda
 FLASHINFER_DIR ?= $(HOME)/dev/flashinfer
-ARTIFACT_DIR ?= $(error set ARTIFACT_DIR to the trtllm-gen fmha artifact directory)
+ARTIFACT_DIR ?=
+CUTLASS_DIR ?= $(FLASHINFER_DIR)/3rdparty/cutlass
+
+ifneq ($(MAKECMDGOALS),clean)
+ifeq ($(strip $(ARTIFACT_DIR)),)
+$(error set ARTIFACT_DIR to the trtllm-gen fmha artifact directory)
+endif
+METAINFO_HASH := $(shell awk '$$2 == "include/flashInferMetaInfo.h" { print $$1 }' $(ARTIFACT_DIR)/checksums.txt)
+endif
 
 NVCC := $(CUDA_HOME)/bin/nvcc
 
@@ -28,8 +37,11 @@ libgrout_trtllm.so: grout_trtllm_shim.cu
 	$(NVCC) -O2 -std=c++17 -shared -Xcompiler -fPIC \
 	  -I$(FLASHINFER_DIR)/include \
 	  -I$(FLASHINFER_DIR)/csrc \
+	  -I$(CUTLASS_DIR)/include \
+	  -I$(CUTLASS_DIR)/tools/util/include \
 	  -I$(ARTIFACT_DIR)/include \
 	  -DTLLM_GEN_FMHA_CUBIN_PATH=\"$(ARTIFACT_DIR)\" \
+	  -DTLLM_GEN_FMHA_METAINFO_HASH=\"$(METAINFO_HASH)\" \
 	  -lcuda -lnvrtc \
 	  -o $@ $<
 
