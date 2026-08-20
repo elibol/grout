@@ -25,9 +25,37 @@
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
+
+namespace {
+class ShimIcheck {
+ public:
+  ShimIcheck(bool condition, const char* expression)
+      : failed_(!condition), expression_(expression) {}
+
+  template <typename T>
+  ShimIcheck& operator<<(T&& value) {
+    if (failed_) message_ << std::forward<T>(value);
+    return *this;
+  }
+
+  ~ShimIcheck() noexcept(false) {
+    if (!failed_) return;
+    throw std::runtime_error(std::string("Check failed: ") + expression_ + ": " + message_.str());
+  }
+
+ private:
+  bool failed_;
+  const char* expression_;
+  std::ostringstream message_;
+};
+}  // namespace
+
+#define TVM_FFI_ICHECK(condition) ShimIcheck(static_cast<bool>(condition), #condition)
 
 // Cubin loader: flashinfer's python flow downloads artifacts; here we read
 // them from the directory the cubin path prefix (TLLM_GEN_FMHA_CUBIN_PATH,
@@ -654,7 +682,7 @@ int grout_trtllm_paged_context_f16(
         /*max_num_blocks_per_seq=*/pages,
         /*bmm1_scale=*/double(bmm1_scale), /*bmm2_scale=*/1.0,
         /*bmm1_scale_log2_ptr=*/nullptr, /*bmm2_scale_ptr=*/nullptr,
-        /*o_sf_scale=*/0.0, /*o_sf_vec_size=*/0, /*o_sf_start_index=*/0,
+        /*o_sf_scale=*/0.0, /*o_sf_vec_size=*/-1, /*o_sf_start_index=*/0,
         /*window_left=*/-1, /*sum_seq_q=*/q_len, /*sparse_mla_top_k=*/0,
         /*sliding_window_kv_pool=*/nullptr, /*sparse_mla_top_k_lens=*/nullptr,
         /*has_sliding_window_kv_pool=*/false,

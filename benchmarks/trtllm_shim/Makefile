@@ -32,9 +32,11 @@ METAINFO_HASH := $(shell awk '$$2 == "include/flashInferMetaInfo.h" { print $$1 
 endif
 
 NVCC := $(CUDA_HOME)/bin/nvcc
+SOURCES := grout_trtllm_shim.cu $(FLASHINFER_DIR)/csrc/fmhaReduction.cu
 
-libgrout_trtllm.so: grout_trtllm_shim.cu
+libgrout_trtllm.so: $(SOURCES)
 	$(NVCC) -O2 -std=c++17 -shared -Xcompiler -fPIC \
+	  -gencode arch=compute_100a,code=sm_100a \
 	  -I$(FLASHINFER_DIR)/include \
 	  -I$(FLASHINFER_DIR)/csrc \
 	  -I$(CUTLASS_DIR)/include \
@@ -43,7 +45,7 @@ libgrout_trtllm.so: grout_trtllm_shim.cu
 	  -DTLLM_GEN_FMHA_CUBIN_PATH=\"$(ARTIFACT_DIR)\" \
 	  -DTLLM_GEN_FMHA_METAINFO_HASH=\"$(METAINFO_HASH)\" \
 	  -lcuda -lnvrtc \
-	  -o $@ $<
+	  -o $@ $(SOURCES)
 
 clean:
 	rm -f libgrout_trtllm.so
