@@ -1130,3 +1130,42 @@ warmups; EOS termination was disabled.
 The cross-tg linear fit gives decode rates of 79.5 tok/s for grout, 77.7 for
 vLLM, and 77.2 for SGLang. Grout's direct phase timers report 81.3, 79.8, and
 79.6 tok/s at tg 36, 128, and 512 respectively.
+
+## Canonical paper sweep: long prefill
+
+Date: 2026-08-20
+
+The clean B200/Qwen3-32B long-context bundle is
+`benchmarks/results/sweep/20260820_154835_b200_32b_canonical_long_pp_cutile`.
+It used the same engine/compiler revisions and default clocks as the other two
+canonical bundles. Each cell contains 3 measured requests after 3 warmups;
+vLLM prefix caching and SGLang radix caching were disabled. Grout used the
+shipping checked cuTile LPT profile. SGLang selected `trtllm_mha`, while vLLM
+auto-selected TRTLLM prefill attention.
+
+| pp | grout e2e (ms) | vLLM e2e (ms) | grout vs vLLM | SGLang e2e (ms) | grout vs SGLang |
+|---:|---:|---:|---:|---:|---:|
+| 16384 | 1641.31 | **1565.88** | +4.82% | 1596.40 | +2.81% |
+| 32768 | 3479.52 | **3112.56** | +11.79% | 3181.57 | +9.37% |
+
+The corresponding direct grout prefill medians are 1165.14 and 2985.51 ms.
+Baseline `prefill_ms` is TTFT rather than a pure prefill timer, so the table
+uses the cross-engine e2e metric.
+
+The opt-in trtllm-gen companion arm is absent by design: the available artifact
+lacks the FP16 causal `SeparateQkv` context kernel required by grout. The smoke
+test took the checked-cuTile fallback on every attempted call, so those timings
+were not mislabeled as trtllm-gen results. A matching artifact is required to
+produce that fourth bundle.
+
+## Canonical B200 paper set
+
+These three clean bundles supersede all pre-fix B200/Qwen3-32B paper numbers:
+
+- `20260820_145859_b200_32b_canonical_pp`: pp 18 through 2048
+- `20260820_152625_b200_32b_canonical_tg`: tg 36 through 512
+- `20260820_154835_b200_32b_canonical_long_pp_cutile`: pp 16384 and 32768
+
+The default pp=2048 plus 24-token correctness output is byte-identical to the
+established reference, SHA-256
+`407673405ccd7be79b119811ced911cba08b12f1ea59758a3bc676fd8d68cf74`.
