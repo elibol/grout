@@ -20,11 +20,11 @@ tokenizers = "0.20.4"
 
 cudarc = { version = "0.19.2", default-features = false, features = ["std", "cublas", "dynamic-loading", "cuda-13010"] }
 
-cuda-bindings = "0.2.0"
-cuda-core = "0.2.0"
-cuda-async = "0.2.0"
-cutile-compiler = "0.2.0"
-cutile = "0.2.0"
+cuda-bindings = "0.3.0"
+cuda-core = "0.3.0"
+cuda-async = "0.3.0"
+cutile-compiler = "0.3.0"
+cutile = "0.3.0"
 
 # Rank-3 mapped partitions + shared index streams (iter_indices_with) for the
 # safe-kernel migration. Drop this section once the feature branch ships in a

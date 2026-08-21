@@ -12,7 +12,7 @@ Directory layout is sibling-relative to the grout checkout:
 ```
 dev/
 ├── grout/            # branch safe-kernels
-├── cutile-rs/        # branch feat/mapped-partition-bounded-pipelined  (REQUIRED)
+├── cutile-rs/        # tag v0.3.0 (REQUIRED; the evaluated branch merged at this release)
 ├── hf_models/qwen3_4b/           # HF snapshot (config + safetensors + tokenizer)
 ├── bench_envs/                   # only for baseline arms
 │   ├── vllm_env/                 # python venv with vllm
