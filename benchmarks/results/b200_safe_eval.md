@@ -1169,3 +1169,62 @@ These three clean bundles supersede all pre-fix B200/Qwen3-32B paper numbers:
 The default pp=2048 plus 24-token correctness output is byte-identical to the
 established reference, SHA-256
 `407673405ccd7be79b119811ced911cba08b12f1ea59758a3bc676fd8d68cf74`.
+
+## Paged trtllm-gen backend validation
+
+Date: 2026-08-20
+
+- grout functional source: `d963df1ecc92885507db19ce8b6ebac1e78d9183`
+- standalone shim build fix: `ef83a5b`
+- cutile-rs: `e90f9b8f1c24d0eb9528741395edda02bf441361`
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B, default clocks
+
+The page-16 retry supersedes the earlier ragged-artifact failure. The shim
+needed three standalone build corrections: a local compatibility wrapper for
+the copied launcher's TVM streaming checks, the documented `-1` sentinel for
+the unused output-scale vector, and FlashInfer's `fmhaReduction.cu` linked for
+`sm_100a`. The launcher body remains unchanged.
+
+The pp=2048 plus 24-token smoke ran the trtllm page-16 path with
+`GROUT_TRTLLM_REPACK` unset. There was no fallback warning, launch error, TMA
+diagnostic, or NaN. Generated text was byte-identical to the default cuTile
+run. The dense K/V cache was consumed in place: no K/V repack or copy kernel
+ran; only the page table and sequence-length metadata were updated.
+
+### Paired pure-prefill result
+
+The retained bundle is
+`benchmarks/results/trtllm_paged_b200_32b_20260820`. Each arm used one warmup
+request after JIT/capture and one measured request in each of three
+order-alternating rounds.
+
+| pp | cuTile mean (ms) | trtllm mean (ms) | saved (ms) | delta |
+|---:|---:|---:|---:|---:|
+| 16384 | 1154.271 | **1091.097** | 63.174 | -5.47% |
+| 32768 | 2967.351 | **2644.415** | 322.936 | -10.88% |
+
+All six trtllm measurements were fallback-free. Per-round savings were
+54.465/71.238/63.818 ms at 16K and 322.425/321.050/325.333 ms at 32K. The
+measured gains are below the raw 98/396 ms kernel ceiling, consistent with the
+v1 synchronization brackets around each trtllm layer call.
+
+### Canonical long-prefill ladder
+
+The four-rung bundle is
+`benchmarks/results/sweep/20260820_171100_b200_32b_canonical_long_pp_trtllm_paged`.
+It contains 3 measured requests after 3 warmups for current-tree checked
+cuTile LPT, zero-copy grout-trtllm, SGLang, and vLLM. Baseline caches were
+disabled; SGLang selected `trtllm_mha` and vLLM auto-selected TRTLLM prefill
+attention.
+
+| engine / arm | 16K e2e (ms) | vs vLLM | 32K e2e (ms) | vs vLLM |
+|---|---:|---:|---:|---:|
+| grout, checked cuTile LPT | 1631.87 | +4.58% | 3487.45 | +12.17% |
+| grout, trtllm page-16 zero-copy | 1569.97 | +0.62% | 3157.16 | +1.55% |
+| SGLang | 1596.67 | +2.33% | 3178.43 | +2.23% |
+| vLLM | **1560.35** | - | **3109.04** | - |
+
+Relative to the same-revision cuTile arm, trtllm reduces full-request latency
+by 3.79% at 16K and 9.47% at 32K. It closes 86.6% and 87.3% of grout's prior
+same-session gap to vLLM while preserving the opt-in default and avoiding K/V
+data movement.

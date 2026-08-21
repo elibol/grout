@@ -1,0 +1,12 @@
+{"engine":"grout","variant":"cutile-r1-first","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1151.563,"decode_ms":0.000,"e2e_ms":1151.564}
+{"engine":"grout","variant":"trtllm-r1-second","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1097.098,"decode_ms":0.004,"e2e_ms":1097.102}
+{"engine":"grout","variant":"trtllm-r2-first","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1080.499,"decode_ms":0.004,"e2e_ms":1080.503}
+{"engine":"grout","variant":"cutile-r2-second","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1151.737,"decode_ms":0.000,"e2e_ms":1151.737}
+{"engine":"grout","variant":"cutile-r3-first","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1159.513,"decode_ms":0.006,"e2e_ms":1159.519}
+{"engine":"grout","variant":"trtllm-r3-second","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1095.695,"decode_ms":0.000,"e2e_ms":1095.696}
+{"engine":"grout","variant":"cutile-r1-first","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2965.687,"decode_ms":0.000,"e2e_ms":2965.687}
+{"engine":"grout","variant":"trtllm-r1-second","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2643.262,"decode_ms":0.000,"e2e_ms":2643.263}
+{"engine":"grout","variant":"trtllm-r2-first","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2645.165,"decode_ms":0.000,"e2e_ms":2645.165}
+{"engine":"grout","variant":"cutile-r2-second","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2966.215,"decode_ms":0.000,"e2e_ms":2966.216}
+{"engine":"grout","variant":"cutile-r3-first","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2970.151,"decode_ms":0.000,"e2e_ms":2970.152}
+{"engine":"grout","variant":"trtllm-r3-second","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2644.818,"decode_ms":0.004,"e2e_ms":2644.822}

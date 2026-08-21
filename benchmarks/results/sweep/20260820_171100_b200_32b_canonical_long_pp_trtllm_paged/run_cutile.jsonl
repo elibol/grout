@@ -1,0 +1,6 @@
+{"engine":"grout","variant":"cutile-lpt","pp":16384,"tg":36,"rep":0,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1155.855,"decode_ms":472.169,"e2e_ms":1628.034}
+{"engine":"grout","variant":"cutile-lpt","pp":16384,"tg":36,"rep":1,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1154.438,"decode_ms":477.417,"e2e_ms":1631.865}
+{"engine":"grout","variant":"cutile-lpt","pp":16384,"tg":36,"rep":2,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1161.175,"decode_ms":480.074,"e2e_ms":1641.258}
+{"engine":"grout","variant":"cutile-lpt","pp":32768,"tg":36,"rep":0,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2997.888,"decode_ms":497.811,"e2e_ms":3495.708}
+{"engine":"grout","variant":"cutile-lpt","pp":32768,"tg":36,"rep":1,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2979.457,"decode_ms":493.358,"e2e_ms":3472.823}
+{"engine":"grout","variant":"cutile-lpt","pp":32768,"tg":36,"rep":2,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2991.127,"decode_ms":496.311,"e2e_ms":3487.448}
