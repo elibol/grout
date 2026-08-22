@@ -1,0 +1,11 @@
+Using the canonical pp=18 prompt.
+
+Building grout…
+warning: `grout` (lib) generated 12 warnings
+    Finished `release` profile [optimized] target(s) in 2.33s
+
+=== fmha_decode_gqa_split   tg=128  kv_len≈146   (decode_ms median over 128 tokens; lower=better) ===
+BN\NKS	2	4	8
+16	1735.86	1724.22	1721.13
+32	1726.20	1716.14	1716.22
+64	1712.71	1708.36	1707.88

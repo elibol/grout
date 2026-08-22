@@ -1,0 +1,62 @@
+START pp=16384 variant=lpt-bn64-lat2-mask1
+  [timed] run 1/1: prompt_tokens=16384, gen_tokens=0, prefill_ms=1091.03, decode_ms=0.00, e2e_ms=1091.04, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15016.9
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15016.9, elapsed=1.091s
+START pp=16384 variant=lpt-bn128-lat2-mask1
+  [timed] run 1/1: prompt_tokens=16384, gen_tokens=0, prefill_ms=1077.04, decode_ms=0.00, e2e_ms=1077.04, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15212.1
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15212.1, elapsed=1.077s
+START pp=16384 variant=lpt-bn256-lat2-mask1
+  [timed] run 1/1: prompt_tokens=16384, gen_tokens=0, prefill_ms=1324.95, decode_ms=0.00, e2e_ms=1324.95, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=12365.7
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=12365.7, elapsed=1.325s
+START pp=16384 variant=lpt-bn128-lat3-mask1
+  [timed] run 1/1: prompt_tokens=16384, gen_tokens=0, prefill_ms=1076.94, decode_ms=0.00, e2e_ms=1076.94, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15213.5
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15213.5, elapsed=1.077s
+START pp=16384 variant=lpt-bn128-lat2-mask0
+  [timed] run 1/1: prompt_tokens=16384, gen_tokens=0, prefill_ms=1086.19, decode_ms=0.00, e2e_ms=1086.19, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15083.9
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=15083.9, elapsed=1.086s
+START pp=32768 variant=lpt-bn64-lat2-mask1
+  [timed] run 1/1: prompt_tokens=32768, gen_tokens=0, prefill_ms=2814.48, decode_ms=0.00, e2e_ms=2814.48, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11642.7
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11642.7, elapsed=2.814s
+START pp=32768 variant=lpt-bn128-lat2-mask1
+  [timed] run 1/1: prompt_tokens=32768, gen_tokens=0, prefill_ms=2760.44, decode_ms=0.00, e2e_ms=2760.44, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11870.6
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11870.6, elapsed=2.760s
+START pp=32768 variant=lpt-bn256-lat2-mask1
+  [timed] run 1/1: prompt_tokens=32768, gen_tokens=0, prefill_ms=3838.50, decode_ms=0.00, e2e_ms=3838.50, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=8536.7
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=8536.7, elapsed=3.838s
+START pp=32768 variant=lpt-bn128-lat3-mask1
+  [timed] run 1/1: prompt_tokens=32768, gen_tokens=0, prefill_ms=2749.55, decode_ms=0.00, e2e_ms=2749.56, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11917.6
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11917.6, elapsed=2.750s
+START pp=32768 variant=lpt-bn128-lat2-mask0
+  [timed] run 1/1: prompt_tokens=32768, gen_tokens=0, prefill_ms=2829.73, decode_ms=0.00, e2e_ms=2829.73, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11579.9
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=11579.9, elapsed=2.830s
+START pp=2048 variant=qk-bm16
+  [timed] run 1/1: prompt_tokens=2048, gen_tokens=0, prefill_ms=114.32, decode_ms=0.00, e2e_ms=114.32, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17914.9
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17914.9, elapsed=0.114s
+START pp=2048 variant=qk-bm32
+  [timed] run 1/1: prompt_tokens=2048, gen_tokens=0, prefill_ms=110.84, decode_ms=0.00, e2e_ms=110.84, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=18476.9
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=18476.9, elapsed=0.111s
+START pp=2048 variant=qk-bm64
+  [timed] run 1/1: prompt_tokens=2048, gen_tokens=0, prefill_ms=111.35, decode_ms=0.00, e2e_ms=111.35, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=18391.8
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=18391.8, elapsed=0.111s
+START pp=8192 variant=qk-bm16
+SKIP pp=16384 variant=lpt-bn64-lat2-mask1 (already recorded)
+SKIP pp=16384 variant=lpt-bn128-lat2-mask1 (already recorded)
+SKIP pp=16384 variant=lpt-bn256-lat2-mask1 (already recorded)
+SKIP pp=16384 variant=lpt-bn128-lat3-mask1 (already recorded)
+SKIP pp=16384 variant=lpt-bn128-lat2-mask0 (already recorded)
+SKIP pp=32768 variant=lpt-bn64-lat2-mask1 (already recorded)
+SKIP pp=32768 variant=lpt-bn128-lat2-mask1 (already recorded)
+SKIP pp=32768 variant=lpt-bn256-lat2-mask1 (already recorded)
+SKIP pp=32768 variant=lpt-bn128-lat3-mask1 (already recorded)
+SKIP pp=32768 variant=lpt-bn128-lat2-mask0 (already recorded)
+SKIP pp=2048 variant=qk-bm16 (already recorded)
+SKIP pp=2048 variant=qk-bm32 (already recorded)
+SKIP pp=2048 variant=qk-bm64 (already recorded)
+START pp=8192 variant=qk-bm16
+  [timed] run 1/1: prompt_tokens=8192, gen_tokens=0, prefill_ms=478.89, decode_ms=0.00, e2e_ms=478.89, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17106.2
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17106.2, elapsed=0.479s
+START pp=8192 variant=qk-bm32
+  [timed] run 1/1: prompt_tokens=8192, gen_tokens=0, prefill_ms=477.05, decode_ms=0.00, e2e_ms=477.05, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17172.2
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17172.2, elapsed=0.477s
+START pp=8192 variant=qk-bm64
+  [timed] run 1/1: prompt_tokens=8192, gen_tokens=0, prefill_ms=476.81, decode_ms=0.00, e2e_ms=476.81, decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17181.0
+  [grout] mean over 1 runs: decode_phase_tps=0.0, request_gen_tps=0.0, e2e_tps=17181.0, elapsed=0.477s

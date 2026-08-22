@@ -1,0 +1,15 @@
+Building grout…
+warning: `grout` (lib) generated 12 warnings
+    Finished `release` profile [optimized] target(s) in 2.36s
+
+Generating temporary prompts.
+
+=== fmha_prefill_causal   pp=2048   (prefill_ms median; '-' = BM > pp, skipped) ===
+BM\BN	64	128	256
+64	109.71	106.49	113.96
+128	108.15	106.14	115.77
+
+=== fmha_prefill_causal   pp=8192   (prefill_ms median; '-' = BM > pp, skipped) ===
+BM\BN	64	128	256
+64	504.30	498.76	592.87
+128	498.34	471.14	583.28

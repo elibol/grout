@@ -1,0 +1,16 @@
+{"engine":"grout","variant":"lpt-bn64-lat2-mask1","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1091.035,"decode_ms":0.001,"e2e_ms":1091.036}
+{"engine":"grout","variant":"lpt-bn128-lat2-mask1","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1077.035,"decode_ms":0.001,"e2e_ms":1077.036}
+{"engine":"grout","variant":"lpt-bn256-lat2-mask1","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1324.951,"decode_ms":0.001,"e2e_ms":1324.951}
+{"engine":"grout","variant":"lpt-bn128-lat3-mask1","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1076.935,"decode_ms":0.001,"e2e_ms":1076.936}
+{"engine":"grout","variant":"lpt-bn128-lat2-mask0","pp":16384,"tg":0,"rep":0,"prompt_tokens":16384,"gen_tokens":0,"prefill_ms":1086.188,"decode_ms":0.001,"e2e_ms":1086.189}
+{"engine":"grout","variant":"lpt-bn64-lat2-mask1","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2814.476,"decode_ms":0.001,"e2e_ms":2814.477}
+{"engine":"grout","variant":"lpt-bn128-lat2-mask1","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2760.438,"decode_ms":0.001,"e2e_ms":2760.439}
+{"engine":"grout","variant":"lpt-bn256-lat2-mask1","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":3838.497,"decode_ms":0.001,"e2e_ms":3838.498}
+{"engine":"grout","variant":"lpt-bn128-lat3-mask1","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2749.555,"decode_ms":0.001,"e2e_ms":2749.556}
+{"engine":"grout","variant":"lpt-bn128-lat2-mask0","pp":32768,"tg":0,"rep":0,"prompt_tokens":32768,"gen_tokens":0,"prefill_ms":2829.727,"decode_ms":0.001,"e2e_ms":2829.728}
+{"engine":"grout","variant":"qk-bm16","pp":2048,"tg":0,"rep":0,"prompt_tokens":2048,"gen_tokens":0,"prefill_ms":114.317,"decode_ms":0.001,"e2e_ms":114.318}
+{"engine":"grout","variant":"qk-bm32","pp":2048,"tg":0,"rep":0,"prompt_tokens":2048,"gen_tokens":0,"prefill_ms":110.840,"decode_ms":0.001,"e2e_ms":110.841}
+{"engine":"grout","variant":"qk-bm64","pp":2048,"tg":0,"rep":0,"prompt_tokens":2048,"gen_tokens":0,"prefill_ms":111.353,"decode_ms":0.001,"e2e_ms":111.354}
+{"engine":"grout","variant":"qk-bm16","pp":8192,"tg":0,"rep":0,"prompt_tokens":8192,"gen_tokens":0,"prefill_ms":478.890,"decode_ms":0.001,"e2e_ms":478.891}
+{"engine":"grout","variant":"qk-bm32","pp":8192,"tg":0,"rep":0,"prompt_tokens":8192,"gen_tokens":0,"prefill_ms":477.049,"decode_ms":0.001,"e2e_ms":477.050}
+{"engine":"grout","variant":"qk-bm64","pp":8192,"tg":0,"rep":0,"prompt_tokens":8192,"gen_tokens":0,"prefill_ms":476.806,"decode_ms":0.001,"e2e_ms":476.807}

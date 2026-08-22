@@ -1253,3 +1253,27 @@ The tg=128 direct decode rate is 78.9 tok/s versus 79.8 tok/s recorded
 regression escalation was required.
 
 **Phase 1 regressions found: no.**
+
+## cutile-rs v0.3.0 tuning screens
+
+Date: 2026-08-22
+
+One-request screens after one warmup re-checked every requested sm_100 tuning
+family. Candidates had to clear 1% before a paired adoption run.
+
+| family | shipping cell | best alternative | screen result |
+|---|---|---|---:|
+| mapped prefill, pp=2048 | BM128/BN128, 106.14 ms | BM64/BN128, 106.49 ms | shipping +0.33% |
+| mapped prefill, pp=8192 | BM128/BN128, 471.14 ms | BM128/BN64, 498.34 ms | shipping +5.77% |
+| decode, tg=128 | BN32/NKS4, 1716.14 ms | BN64/NKS8, 1707.88 ms | alternative +0.48% |
+| LPT, pp=16384 | BN128/lat2/mask1, 1077.04 ms | latency 3, 1076.94 ms | alternative +0.01% |
+| LPT, pp=32768 | BN128/lat2/mask1, 2760.44 ms | latency 3, 2749.55 ms | alternative +0.39% |
+| wide fused Q, pp=2048 | BM32, 110.84 ms | BM64, 111.35 ms | shipping +0.46% |
+| wide fused Q, pp=8192 | BM32, 477.05 ms | BM64, 476.81 ms | alternative +0.05% |
+
+BN=256 was substantially slower for mapped and LPT attention. The LPT
+mask-split optimization still matters: disabling it cost 0.85% at 16K and
+2.51% at 32K. No alternative crossed the 1% adoption bar, so there were no
+paired finalists and no edits to the sm_100 profiles.
+
+**Phase 2 tuning changes adopted: none.**
