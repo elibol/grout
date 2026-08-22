@@ -1306,3 +1306,20 @@ cells when reporting the current compiler revision. A full-table reissue is
 not required because no tuning profile changed.
 
 **Regressions found across Phases 1-3: no.**
+
+## cutile-rs v0.3.0 trtllm backend spot check
+
+Date: 2026-08-22
+
+The opt-in page-16 trtllm context backend was rerun at default clocks with
+three measured requests after three warmups. Zero-copy mode was used; no
+fallback warning or launch error appeared.
+
+| pp | current trtllm e2e (ms) | prior e2e (ms) | cross-session delta |
+|---:|---:|---:|---:|
+| 16384 | 1491.74 | 1569.97 | -4.98% |
+| 32768 | 2970.52 | 3157.16 | -5.91% |
+
+The compiler-independent backend passes its spot check. The current values
+are faster than the prior session rather than just at parity, but this is not
+a paired A/B and is therefore recorded only as a non-regression result.

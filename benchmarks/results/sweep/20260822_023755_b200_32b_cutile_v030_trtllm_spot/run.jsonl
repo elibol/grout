@@ -1,0 +1,6 @@
+{"engine":"grout","variant":"trtllm-paged","pp":16384,"tg":36,"rep":0,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1014.994,"decode_ms":477.334,"e2e_ms":1492.349}
+{"engine":"grout","variant":"trtllm-paged","pp":16384,"tg":36,"rep":1,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1013.914,"decode_ms":472.250,"e2e_ms":1486.185}
+{"engine":"grout","variant":"trtllm-paged","pp":16384,"tg":36,"rep":2,"prompt_tokens":16384,"gen_tokens":36,"prefill_ms":1017.218,"decode_ms":474.503,"e2e_ms":1491.742}
+{"engine":"grout","variant":"trtllm-paged","pp":32768,"tg":36,"rep":0,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2467.840,"decode_ms":496.444,"e2e_ms":2964.304}
+{"engine":"grout","variant":"trtllm-paged","pp":32768,"tg":36,"rep":1,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2473.052,"decode_ms":497.449,"e2e_ms":2970.523}
+{"engine":"grout","variant":"trtllm-paged","pp":32768,"tg":36,"rep":2,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2473.857,"decode_ms":497.022,"e2e_ms":2970.900}

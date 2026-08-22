@@ -1,0 +1,82 @@
+═══════════════════════════════════════════════════════════════
+ Prefill scan  (pp ∈ {16384 32768}, tg=36)
+ reps=3, reps_long_gt512=3, warmup=3, clock_lock=none
+ grout_tuning_profile=sm100_b200
+ 2026-08-22T02:37:55-0700
+═══════════════════════════════════════════════════════════════
+
+[1;36m==> Generating prompt files at exact token counts[0m
+  pp=16384  actual_tokens=16384  kind=synthetic raw   path=./benchmarks/results/sweep/20260822_023755/prompts/pp_16384.txt
+  pp=32768  actual_tokens=32768  kind=synthetic raw   path=./benchmarks/results/sweep/20260822_023755/prompts/pp_32768.txt
+
+Wrote 2 prompt files to ./benchmarks/results/sweep/20260822_023755/prompts/
+
+[1;36m==> Benchmark: grout[0m
+
+warning: `grout` (lib) generated 12 warnings
+    Finished `release` profile [optimized] target(s) in 2.35s
+
+--- grout pp=16384 tg=36  (reps=3 BM=16 BN_PRE=128 BN_DEC=64 NKS=32 max_seq=16420 GQA=0 LPT=1 GROUP=0 SW=8 SCHED=1 MASK_SPLIT=1) ---
+    num_hidden_layers: 64,
+    num_attention_heads: 64,
+    num_key_value_heads: 8,
+    head_dim: 128,
+    rms_norm_eps: 1e-6,
+    rope_theta: 1000000.0,
+    max_position_embeddings: 40960,
+    tie_word_embeddings: false,
+    use_sliding_window: false,
+    eos_token_id: 151645,
+}
+Loaded model from Qwen3-32B
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [68488 chars]
+Generating 36 tokens x 3 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=77.3, request_gen_tps=5.2, prompt_s=4.303
+  [warmup] run 1/3: prompt_tokens=16384, gen_tokens=36, prefill_ms=1008.64, decode_ms=472.01, e2e_ms=1480.68, decode_phase_tps=76.3, request_gen_tps=24.3, e2e_tps=11089.5
+  [warmup] run 2/3: prompt_tokens=16384, gen_tokens=36, prefill_ms=1015.65, decode_ms=474.16, e2e_ms=1489.84, decode_phase_tps=75.9, request_gen_tps=24.2, e2e_tps=11021.3
+  [warmup] run 3/3: prompt_tokens=16384, gen_tokens=36, prefill_ms=1010.36, decode_ms=472.44, e2e_ms=1482.83, decode_phase_tps=76.2, request_gen_tps=24.3, e2e_tps=11073.4
+
+  [timed] run 1/3: prompt_tokens=16384, gen_tokens=36, prefill_ms=1014.99, decode_ms=477.33, e2e_ms=1492.35, decode_phase_tps=75.4, request_gen_tps=24.1, e2e_tps=11002.8
+  [timed] run 2/3: prompt_tokens=16384, gen_tokens=36, prefill_ms=1013.91, decode_ms=472.25, e2e_ms=1486.18, decode_phase_tps=76.2, request_gen_tps=24.2, e2e_tps=11048.4
+  [timed] run 3/3: prompt_tokens=16384, gen_tokens=36, prefill_ms=1017.22, decode_ms=474.50, e2e_ms=1491.74, decode_phase_tps=75.9, request_gen_tps=24.1, e2e_tps=11007.3
+  [grout] mean over 3 runs: decode_phase_tps=75.8, request_gen_tps=24.2, e2e_tps=11019.5, elapsed=1.490s
+
+--- grout pp=32768 tg=36  (reps=3 BM=16 BN_PRE=128 BN_DEC=64 NKS=32 max_seq=32804 GQA=0 LPT=1 GROUP=0 SW=8 SCHED=1 MASK_SPLIT=1) ---
+    num_hidden_layers: 64,
+    num_attention_heads: 64,
+    num_key_value_heads: 8,
+    head_dim: 128,
+    rms_norm_eps: 1e-6,
+    rope_theta: 1000000.0,
+    max_position_embeddings: 40960,
+    tie_word_embeddings: false,
+    use_sliding_window: false,
+    eos_token_id: 151645,
+}
+Loaded model from Qwen3-32B
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [136968 chars]
+Generating 36 tokens x 3 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=73.8, request_gen_tps=4.3, prompt_s=5.719
+  [warmup] run 1/3: prompt_tokens=32768, gen_tokens=36, prefill_ms=2466.06, decode_ms=498.35, e2e_ms=2964.43, decode_phase_tps=72.2, request_gen_tps=12.1, e2e_tps=11065.9
+  [warmup] run 2/3: prompt_tokens=32768, gen_tokens=36, prefill_ms=2465.74, decode_ms=496.90, e2e_ms=2962.66, decode_phase_tps=72.4, request_gen_tps=12.2, e2e_tps=11072.5
+  [warmup] run 3/3: prompt_tokens=32768, gen_tokens=36, prefill_ms=2467.70, decode_ms=498.18, e2e_ms=2965.91, decode_phase_tps=72.3, request_gen_tps=12.1, e2e_tps=11060.4
+
+  [timed] run 1/3: prompt_tokens=32768, gen_tokens=36, prefill_ms=2467.84, decode_ms=496.44, e2e_ms=2964.30, decode_phase_tps=72.5, request_gen_tps=12.1, e2e_tps=11066.3
+  [timed] run 2/3: prompt_tokens=32768, gen_tokens=36, prefill_ms=2473.05, decode_ms=497.45, e2e_ms=2970.52, decode_phase_tps=72.4, request_gen_tps=12.1, e2e_tps=11043.2
+  [timed] run 3/3: prompt_tokens=32768, gen_tokens=36, prefill_ms=2473.86, decode_ms=497.02, e2e_ms=2970.90, decode_phase_tps=72.4, request_gen_tps=12.1, e2e_tps=11041.8
+  [grout] mean over 3 runs: decode_phase_tps=72.4, request_gen_tps=12.1, e2e_tps=11050.4, elapsed=2.969s
+
+[1;36m==> Benchmark: SGLang (no-radix)[0m
+
+[1;36m==> Benchmark: vLLM (cuda-graph, prefix-cache OFF)[0m
+
+[1;36m==> Aggregating prefill scan[0m
+wrote ./benchmarks/results/sweep/20260822_023755/aggregate.csv
+wrote ./benchmarks/results/sweep/20260822_023755/aggregate.md
+
+Done. Results in: ./benchmarks/results/sweep/20260822_023755
+  run.jsonl, aggregate.csv, aggregate.md
