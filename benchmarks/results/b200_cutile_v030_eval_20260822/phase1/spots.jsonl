@@ -1,0 +1,9 @@
+{"engine":"grout","variant":"pp2048-v030","pp":2048,"tg":36,"rep":0,"prompt_tokens":2048,"gen_tokens":36,"prefill_ms":103.275,"decode_ms":460.421,"e2e_ms":563.722}
+{"engine":"grout","variant":"pp2048-v030","pp":2048,"tg":36,"rep":1,"prompt_tokens":2048,"gen_tokens":36,"prefill_ms":105.728,"decode_ms":460.529,"e2e_ms":566.282}
+{"engine":"grout","variant":"pp2048-v030","pp":2048,"tg":36,"rep":2,"prompt_tokens":2048,"gen_tokens":36,"prefill_ms":103.021,"decode_ms":460.056,"e2e_ms":563.101}
+{"engine":"grout","variant":"pp32768-cutile-v030","pp":32768,"tg":36,"rep":0,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2756.904,"decode_ms":501.478,"e2e_ms":3258.408}
+{"engine":"grout","variant":"pp32768-cutile-v030","pp":32768,"tg":36,"rep":1,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2766.741,"decode_ms":497.810,"e2e_ms":3264.577}
+{"engine":"grout","variant":"pp32768-cutile-v030","pp":32768,"tg":36,"rep":2,"prompt_tokens":32768,"gen_tokens":36,"prefill_ms":2750.259,"decode_ms":501.130,"e2e_ms":3251.414}
+{"engine":"grout","variant":"tg128-v030","pp":18,"tg":128,"rep":0,"prompt_tokens":18,"gen_tokens":128,"prefill_ms":16.400,"decode_ms":1621.919,"e2e_ms":1638.330}
+{"engine":"grout","variant":"tg128-v030","pp":18,"tg":128,"rep":1,"prompt_tokens":18,"gen_tokens":128,"prefill_ms":16.386,"decode_ms":1621.886,"e2e_ms":1638.280}
+{"engine":"grout","variant":"tg128-v030","pp":18,"tg":128,"rep":2,"prompt_tokens":18,"gen_tokens":128,"prefill_ms":16.398,"decode_ms":1622.007,"e2e_ms":1638.414}

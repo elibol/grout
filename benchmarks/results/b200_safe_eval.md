@@ -1228,3 +1228,28 @@ Relative to the same-revision cuTile arm, trtllm reduces full-request latency
 by 3.79% at 16K and 9.47% at 32K. It closes 86.6% and 87.3% of grout's prior
 same-session gap to vLLM while preserving the opt-in default and avoiding K/V
 data movement.
+
+## cutile-rs v0.3.0 regression gate
+
+Date: 2026-08-22
+
+- grout: `b3978d62c063a421e78e580c50a0870243872326`
+- cutile-rs: `v0.3.0` (`0839fe4`)
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B, default clocks
+
+Both release binaries were rebuilt, including the feature-gated
+`grout_bench`. All seven GPU kernel tests passed. The pp=2048 plus 24-token
+generated-text SHA-256 remains
+`407673405ccd7be79b119811ced911cba08b12f1ea59758a3bc676fd8d68cf74`.
+
+| cell | v0.3.0 median | recorded canonical | delta |
+|---|---:|---:|---:|
+| pp=2048, tg=36 e2e | 563.72 ms | 586.76 ms | -3.93% |
+| pp=32768, tg=36 cuTile e2e | 3258.41 ms | 3487.45 ms | -6.57% |
+| pp=18, tg=128 e2e | 1638.33 ms | 1620.72 ms | +1.09% |
+
+The tg=128 direct decode rate is 78.9 tok/s versus 79.8 tok/s recorded
+(-1.13%). No cell crossed the 2% slowdown gate, so no cuobjdump/JIT-counter
+regression escalation was required.
+
+**Phase 1 regressions found: no.**

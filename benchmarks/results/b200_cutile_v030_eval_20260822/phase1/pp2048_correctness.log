@@ -1,0 +1,27 @@
+cfg: Qwen3Config {
+    vocab_size: 151936,
+    hidden_size: 5120,
+    intermediate_size: 25600,
+    num_hidden_layers: 64,
+    num_attention_heads: 64,
+    num_key_value_heads: 8,
+    head_dim: 128,
+    rms_norm_eps: 1e-6,
+    rope_theta: 1000000.0,
+    max_position_embeddings: 40960,
+    tie_word_embeddings: false,
+    use_sliding_window: false,
+    eos_token_id: 151645,
+}
+Loaded model from <models>/qwen3_32b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [8579 chars]
+Generating 24 tokens x 1 measured reps (+ 1 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=79.7, request_gen_tps=2.8, prompt_s=5.843
+  [warmup] run 1/1: prompt_tokens=2048, gen_tokens=24, prefill_ms=103.91, decode_ms=304.98, e2e_ms=408.92, decode_phase_tps=78.7, request_gen_tps=58.7, e2e_tps=5067.0
+
+  [timed] run 1/1: prompt_tokens=2048, gen_tokens=24, prefill_ms=104.32, decode_ms=307.05, e2e_ms=411.40, decode_phase_tps=78.2, request_gen_tps=58.3, e2e_tps=5036.4
+  [grout] mean over 1 runs: decode_phase_tps=78.2, request_gen_tps=58.3, e2e_tps=5036.4, elapsed=0.411s
+
+ very exquisite opal jewels. Heavy boxes perform quick waltzes and jigs. Watch Jeopardy! Alex Tre
