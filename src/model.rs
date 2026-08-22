@@ -265,6 +265,22 @@ impl TunedDefaults {
             // verifier declining (None) leaves provenance fields deciding.
             match cutile::tune::Record::load_verified(&path, &ws, |_| Ok(None)) {
                 Ok((record, warnings)) => {
+                    // load_verified treats cutile_version as informational;
+                    // grout refuses across cutile crate versions too — a
+                    // lowering change shifts optima without touching kernel
+                    // source or the tileiras fingerprint (measured on the
+                    // 0.2 -> 0.3 jump). Retire this once records carry
+                    // l2_key (upstream ask #4).
+                    let current = cutile::tune::Record::new(&ws).cutile_version;
+                    if record.cutile_version != current {
+                        eprintln!(
+                            "tuning record {} refused (cutile {} vs linked {});                              using built-in defaults",
+                            path.display(),
+                            record.cutile_version,
+                            current
+                        );
+                        continue;
+                    }
                     for w in &warnings {
                         eprintln!("tuning record {}: {w}", path.display());
                     }
