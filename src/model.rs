@@ -1648,6 +1648,18 @@ impl Qwen3Engine {
         self.tuned.get(key, q_len).map(|v| v as usize)
     }
 
+    /// Occupancy-style hint: unset env falls to the record, then to the
+    /// built-in default (mirrors env_usize_hint_or semantics).
+    fn tuned_occupancy(&self, key: &str, q_len: usize, default: usize) -> Option<usize> {
+        if std::env::var(key).is_ok() {
+            return env_usize_hint_or(key, default);
+        }
+        self.tuned
+            .get(key, q_len)
+            .map(|v| v as usize)
+            .or(Some(default))
+    }
+
     pub fn set_sampling_enabled(&mut self, enabled: bool) {
         self.do_sample = enabled;
     }
@@ -5894,7 +5906,14 @@ impl Qwen3Engine {
                 // regular Tile IR causal prefill kernel.
                 let default_gqa_lpt =
                     q_len >= 2048 && query_group_size > 1 && device_is_sm100(ctx.get_device_id());
-                let use_gqa_lpt = env_bool_or("GROUT_FMHA_PREFILL_GQA_LPT", default_gqa_lpt);
+                let use_gqa_lpt = if std::env::var("GROUT_FMHA_PREFILL_GQA_LPT").is_ok() {
+                    env_bool_or("GROUT_FMHA_PREFILL_GQA_LPT", default_gqa_lpt)
+                } else {
+                    self.tuned
+                        .get("GROUT_FMHA_PREFILL_GQA_LPT", q_len)
+                        .map(|v| v != 0)
+                        .unwrap_or(default_gqa_lpt)
+                };
                 let use_trtllm = q_len > 1
                     && matches!(position_input, PositionInput::Host(_))
                     && crate::trtllm_attn::enabled();
@@ -5945,8 +5964,9 @@ impl Qwen3Engine {
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
                     let prefill_latency =
                         env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
-                    let prefill_occupancy = env_usize_hint_or(
+                    let prefill_occupancy = self.tuned_occupancy(
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
+                        q_len,
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
                     let prefill_sched = env_usize_or("GROUT_FMHA_PREFILL_LPT_SCHED", 1);
@@ -6060,8 +6080,9 @@ impl Qwen3Engine {
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
                     let prefill_latency =
                         env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
-                    let prefill_occupancy = env_usize_hint_or(
+                    let prefill_occupancy = self.tuned_occupancy(
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
+                        q_len,
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
                     // Safe mapped port: one index per CTA on the
@@ -6107,8 +6128,9 @@ impl Qwen3Engine {
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
                     let prefill_latency =
                         env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
-                    let prefill_occupancy = env_usize_hint_or(
+                    let prefill_occupancy = self.tuned_occupancy(
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
+                        q_len,
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
                     // Safe mapped port: one index per CTA on the

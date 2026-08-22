@@ -103,19 +103,33 @@ struct Bucket {
 }
 
 fn sites(max_seq_len: usize) -> Vec<Site> {
+    // Axes mirror the original tile-sweep scripts (sweep_pp_tile.sh /
+    // sweep_tg_tile.sh) plus the knobs the shipping sm_100/sm_120 profiles
+    // set — critically including the KERNEL DISPATCH flag
+    // (GROUT_FMHA_PREFILL_GQA_LPT) and occupancy. The first B200 tuning
+    // attempt failed its parity gate because the space omitted the
+    // dispatch axis: on sm_100 auto-LPT engaged for every candidate while
+    // the shipping config is the mapped kernel with LPT off. Rule learned:
+    // the incumbent shipping config must be expressible within the space
+    // (it is, for both arches: sm_100 mapped 128/128/occ2/LPT0 and the
+    // sm_120 profile corners are all covered).
     let pp_bucket = |pp: usize| Bucket {
         label: format!("pp={pp}"),
         prompt_pp: pp,
-        max_new_tokens: 16, // enough tokens for the text gate
+        max_new_tokens: 16,
         decode_objective: false,
     };
     vec![
         Site {
             name: "prefill_attention",
             axes: vec![
-                ("GROUT_ATTN_BM_PREFILL", vec![64, 128]),
-                ("GROUT_ATTN_BN_PREFILL", vec![32, 64, 128]),
-                ("GROUT_FMHA_PREFILL_WARPS", vec![0, 1, 2, 4]),
+                // 0 = mapped kernel, 1 = LPT kernel; LPT-specific knobs
+                // (swizzle/sched/mask-split) ride engine defaults.
+                ("GROUT_FMHA_PREFILL_GQA_LPT", vec![0, 1]),
+                ("GROUT_ATTN_BM_PREFILL", vec![16, 32, 64, 128]),
+                ("GROUT_ATTN_BN_PREFILL", vec![16, 32, 64, 128]),
+                ("GROUT_FMHA_PREFILL_OCCUPANCY", vec![1, 2]),
+                ("GROUT_FMHA_PREFILL_WARPS", vec![0, 4]),
             ],
             buckets: [512usize, 2048, 8192]
                 .into_iter()
@@ -126,13 +140,15 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
         Site {
             name: "decode_attention",
             axes: vec![
-                ("GROUT_ATTN_BN_DECODE", vec![16, 32, 64]),
-                ("GROUT_FMHA_NUM_KV_SPLITS", vec![4, 8, 16]),
-                ("GROUT_FMHA_DECODE_WARPS", vec![0, 1, 2, 4]),
+                ("GROUT_ATTN_BN_DECODE", vec![16, 32, 64, 128]),
+                ("GROUT_FMHA_NUM_KV_SPLITS", vec![4, 8, 16, 32]),
+                ("GROUT_FMHA_DECODE_WARPS", vec![0, 4]),
             ],
+            // Canonical decode cells use a short prompt; tuning in a long
+            // kv context (the first attempt used pp=512) skews winners.
             buckets: vec![Bucket {
                 label: "tg=128".into(),
-                prompt_pp: 512,
+                prompt_pp: 18,
                 max_new_tokens: 128,
                 decode_objective: true,
             }],
@@ -150,6 +166,85 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 .collect(),
         },
     ]
+}
+
+/// Shipping incumbent configs per arch: coverage is sufficient only if
+/// every incumbent is expressible inside the declared space — verified at
+/// startup, so a candidate space can never again omit the config it must
+/// beat (the failure mode of the first B200 tuning attempt).
+fn incumbents(arch: &str, site: &str) -> Vec<Vec<(&'static str, i64)>> {
+    match (arch, site) {
+        (_, "prefill_attention") if arch.starts_with("sm_100") => vec![
+            // sweep_pp_sm100.sh pp<=8192: mapped kernel, 128x128, occ 2.
+            vec![
+                ("GROUT_FMHA_PREFILL_GQA_LPT", 0),
+                ("GROUT_ATTN_BM_PREFILL", 128),
+                ("GROUT_ATTN_BN_PREFILL", 128),
+                ("GROUT_FMHA_PREFILL_OCCUPANCY", 2),
+                ("GROUT_FMHA_PREFILL_WARPS", 0),
+            ],
+        ],
+        (_, "prefill_attention") => vec![
+            // sweep_pp_sm120.sh: mapped 64x32 short, LPT on at >=2048.
+            vec![
+                ("GROUT_FMHA_PREFILL_GQA_LPT", 0),
+                ("GROUT_ATTN_BM_PREFILL", 64),
+                ("GROUT_ATTN_BN_PREFILL", 32),
+                ("GROUT_FMHA_PREFILL_OCCUPANCY", 1),
+                ("GROUT_FMHA_PREFILL_WARPS", 0),
+            ],
+            vec![
+                ("GROUT_FMHA_PREFILL_GQA_LPT", 1),
+                ("GROUT_ATTN_BM_PREFILL", 16),
+                ("GROUT_ATTN_BN_PREFILL", 64),
+                ("GROUT_FMHA_PREFILL_OCCUPANCY", 1),
+                ("GROUT_FMHA_PREFILL_WARPS", 0),
+            ],
+        ],
+        (_, "decode_attention") if arch.starts_with("sm_100") => vec![
+            // sweep_tg_sm100.sh TG_128 cell.
+            vec![
+                ("GROUT_ATTN_BN_DECODE", 32),
+                ("GROUT_FMHA_NUM_KV_SPLITS", 4),
+                ("GROUT_FMHA_DECODE_WARPS", 0),
+            ],
+        ],
+        (_, "decode_attention") => vec![vec![
+            ("GROUT_ATTN_BN_DECODE", 32),
+            ("GROUT_FMHA_NUM_KV_SPLITS", 16),
+            ("GROUT_FMHA_DECODE_WARPS", 0),
+        ]],
+        (_, "wide_prefill") => vec![vec![
+            ("GROUT_QK_PREFILL_BM", 32),
+            ("GROUT_QK_PREFILL_WARPS", 0),
+        ]],
+        _ => vec![],
+    }
+}
+
+/// Every incumbent parameter value must be a member of its axis.
+fn verify_coverage(arch: &str, site: &Site) -> Result<()> {
+    for incumbent in incumbents(arch, site.name) {
+        for (key, value) in &incumbent {
+            let axis = site
+                .axes
+                .iter()
+                .find(|(name, _)| name == key)
+                .with_context(|| format!("{}: incumbent key {key} has no axis", site.name))?;
+            anyhow::ensure!(
+                axis.1.contains(value),
+                "{}: incumbent {key}={value} is NOT in the declared axis {:?} —                  the space cannot beat a config it does not contain",
+                site.name,
+                axis.1
+            );
+        }
+    }
+    println!(
+        "  coverage ok: {} shipping incumbent(s) inside the {} space",
+        incumbents(arch, site.name).len(),
+        site.name
+    );
+    Ok(())
 }
 
 fn cartesian(axes: &[(&'static str, Vec<i64>)]) -> Vec<Config> {
@@ -379,6 +474,7 @@ fn main() -> Result<()> {
         if args.site != "all" && args.site != site.name {
             continue;
         }
+        verify_coverage(&arch, &site)?;
         let configs = cartesian(&site.axes);
         println!(
             "site {} — {} candidates x {} buckets on {arch}",
