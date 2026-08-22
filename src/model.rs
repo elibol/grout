@@ -256,11 +256,30 @@ fn env_bool_hint_or(var: &str, default: bool) -> Option<bool> {
     Some(raw != "0")
 }
 
+/// Optional worker-warps hint: set only when the env var holds a positive
+/// integer; unset/0/none leaves the compiler default.
+fn env_warps(var: &str) -> Option<usize> {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v > 0)
+}
+
 fn compile_options_with_occupancy(occupancy: Option<usize>) -> CompileOptions {
-    match occupancy {
-        Some(occupancy) => CompileOptions::default().occupancy(occupancy as i32),
-        None => CompileOptions::default(),
+    compile_options_with(occupancy, None)
+}
+
+/// CompileOptions from optional occupancy and worker-warps-per-CTA hints
+/// (cutile-rs 0.3.0 adds the warps knob). None leaves the compiler default.
+fn compile_options_with(occupancy: Option<usize>, warps: Option<usize>) -> CompileOptions {
+    let mut opts = CompileOptions::default();
+    if let Some(occupancy) = occupancy {
+        opts = opts.occupancy(occupancy as i32);
     }
+    if let Some(warps) = warps {
+        opts = opts.num_worker_warps_per_cta(warps as i32);
+    }
+    opts
 }
 
 fn floor_power_of_two_le(n: usize) -> usize {
@@ -2827,8 +2846,9 @@ impl Qwen3Engine {
                             "1".to_string(),
                             "1".to_string(),
                         ])
-                        .compile_options(compile_options_with_occupancy(
+                        .compile_options(compile_options_with(
                             fmha_decode_occupancy,
+                            env_warps("GROUT_FMHA_DECODE_WARPS"),
                         ))
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
@@ -3392,8 +3412,9 @@ impl Qwen3Engine {
                                 "1".to_string(),
                                 "1".to_string(),
                             ])
-                            .compile_options(compile_options_with_occupancy(
+                            .compile_options(compile_options_with(
                                 fmha_decode_occupancy,
+                                env_warps("GROUT_FMHA_DECODE_WARPS"),
                             )),
                         )?;
                         let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
@@ -4516,6 +4537,10 @@ impl Qwen3Engine {
                     bm.to_string(),
                 ])
                 .grid(((bulk_rows / bm) as u32, attn_heads as u32, 1u32))
+                .compile_options(compile_options_with(
+                    None,
+                    env_warps("GROUT_QK_PREFILL_WARPS"),
+                ))
                 .execute(ctx)?;
             }
         }
@@ -4570,6 +4595,10 @@ impl Qwen3Engine {
                     bm.to_string(),
                 ])
                 .grid(((kv_bulk / bm) as u32, kv_heads as u32, 1u32))
+                .compile_options(compile_options_with(
+                    None,
+                    env_warps("GROUT_QK_PREFILL_WARPS"),
+                ))
                 .execute(ctx)?;
             }
         }
@@ -5801,7 +5830,10 @@ impl Qwen3Engine {
                             )
                             .generics(generics)
                             .grid((grid_x, 1u32, 1u32))
-                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                            .compile_options(compile_options_with(
+                                prefill_occupancy,
+                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                            ))
                             .execute(ctx)?;
                         }
                     } else {
@@ -5824,7 +5856,10 @@ impl Qwen3Engine {
                             )
                             .generics(generics)
                             .grid((grid_x, 1u32, 1u32))
-                            .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                            .compile_options(compile_options_with(
+                                prefill_occupancy,
+                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                            ))
                             .execute(ctx)?;
                         }
                     }
@@ -5883,7 +5918,10 @@ impl Qwen3Engine {
                             "1".to_string(),
                             "1".to_string(),
                         ])
-                        .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                        .compile_options(compile_options_with(
+                                prefill_occupancy,
+                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                            ))
                         .execute(ctx)?
                     };
                     result.0.unpartition()
@@ -5924,7 +5962,10 @@ impl Qwen3Engine {
                             "1".to_string(),
                             "1".to_string(),
                         ])
-                        .compile_options(compile_options_with_occupancy(prefill_occupancy))
+                        .compile_options(compile_options_with(
+                                prefill_occupancy,
+                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                            ))
                         .execute(ctx)?
                     };
                     result.0.unpartition()
