@@ -1323,3 +1323,85 @@ fallback warning or launch error appeared.
 The compiler-independent backend passes its spot check. The current values
 are faster than the prior session rather than just at parity, but this is not
 a paired A/B and is therefore recorded only as a non-regression result.
+
+## sm_100 in-binary autotuning records and parity gate
+
+Date: 2026-08-22
+
+- grout tuning parent: `5149cd8b87382d75821d22c306402a83a744acf9`
+- cutile-rs: `v0.3.0`-equivalent internal tag `__sync_pubtag_v0.3.0`
+  (`0839fe4`)
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B, default clocks
+- prompt source: `benchmarks/results/sweep/20260710_161353/prompts`
+
+Status: **FAIL — the generated records lose to the shipping profile at all
+three required parity cells.** The sm_100 profile environment tables were not
+deleted or modified.
+
+### Tuner run
+
+`grout_autotune` ran all sites with three timed repetitions and
+`max-seq-len=16384`. Wall time was 49m45s (13:19:35-14:09:20 PDT). The six
+resumable JSONL logs contain 132 trials: 72 prefill-attention, 36 decode, and
+24 wide-prefill. Every trial state is `Measured`; there were no invalid
+compile, launch, allocation, or correctness-gate candidates in this run.
+
+| site / bucket | selected configuration | tuner median (ms) |
+|---|---|---:|
+| prefill attention, pp=512 | BM=64, BN=64, warps=default | 31.68 |
+| prefill attention, pp=2048 | BM=64, BN=64, warps=1 | 224.66 |
+| prefill attention, pp=8192 | BM=64, BN=64, warps=1 | 2059.47 |
+| decode attention, tg=128 | BN=64, NKS=8, warps=default | 2175.85 |
+| wide prefill, pp=2048 | BM=64, warps=default | 110.55 |
+| wide prefill, pp=8192 | BM=16, warps=default | 502.94 |
+
+Here `warps=default` is the persisted value `0`, which removes the explicit
+worker-warp override.
+
+### Three-arm paired parity gate
+
+Each arm invocation loaded Qwen3-32B, ran one discarded warmup, and then
+recorded three measured repetitions. The three rounds used
+records/built-ins/shipping, shipping/built-ins/records, then
+records/built-ins/shipping order. Prefill used exact raw prompts with zero
+generated tokens. Decode used pp=18, tg=128, and `ignore-eos`. The built-in
+arm set `GROUT_TUNING_RECORD_DIR=/nonexistent`; the shipping arm also disabled
+records and used the environment resolved by `sweep_pp_sm100.sh` or
+`sweep_tg_sm100.sh` for that cell.
+
+Values below are per-round means of three measurements. The overall columns
+are means over all nine measurements for the arm.
+
+| cell / metric | records rounds (ms) | built-ins rounds (ms) | shipping rounds (ms) | overall records / built-ins / shipping (ms) | records vs shipping | gate |
+|---|---:|---:|---:|---:|---:|---|
+| pp=2048 prefill | 213.90 / 213.97 / 213.38 | 111.45 / 111.37 / 108.73 | 108.30 / 109.48 / 107.70 | 213.75 / 110.52 / 108.50 | +97.01% | **FAIL** |
+| pp=8192 prefill | 1967.81 / 1967.94 / 1968.13 | 505.86 / 505.55 / 504.86 | 479.59 / 480.39 / 483.33 | 1967.96 / 505.42 / 481.10 | +309.05% | **FAIL** |
+| pp=18, tg=128 decode | 1715.28 / 1715.30 / 1715.48 | 1716.02 / 1716.08 / 1716.06 | 1622.15 / 1622.05 / 1622.08 | 1715.35 / 1716.05 / 1622.09 | +5.75% | **FAIL** |
+
+The decode record is 0.04% faster than built-ins but 5.75% slower than the
+complete shipping profile, so its tuner win is not validated for deployment.
+
+### Patterns for upstream attention
+
+- The long-prefill engine default on sm_100 auto-enables checked LPT at
+  pp>=2048 and starts from BM=16. The tuner grid contains only BM=64 and
+  BM=128 and does not include the LPT/mapped form switch. The faster built-in
+  long-prefill configuration is therefore outside the declared search space.
+- The shipping pp cells explicitly select mapped attention with BM=128,
+  BN=128 and LPT disabled. The tuner evaluates BM=128/BN=128 under the
+  auto-selected LPT form instead, so that candidate is not the shipping cell
+  despite having the same tile labels.
+- Sites are selected independently, but all persisted winners become active
+  together. There is no final whole-record parity objective against either
+  built-ins or the shipping profile before saving the records.
+- The decode tuner labels its only bucket tg=128 but measures it after a
+  512-token prompt. The shipping tg=128 sweep cell uses pp=18. Its selected
+  BN=64/NKS=8/default-warps result was also isolated at 2175.85 ms while the
+  neighboring decode candidates clustered near 2211-2218 ms. At the actual
+  pp=18 gate it only tied built-ins and lost to the full shipping profile.
+- Saved entries have `l2_key: null`. Startup accepts them after source-level
+  provenance checks but warns that no L2-key staleness check can be applied.
+
+No invalid-candidate family needs compiler follow-up from this run. The
+blocking issues are search-space, bucket-workload, joint-record, and shipping
+parity coverage.
