@@ -1277,3 +1277,32 @@ mask-split optimization still matters: disabling it cost 0.85% at 16K and
 paired finalists and no edits to the sm_100 profiles.
 
 **Phase 2 tuning changes adopted: none.**
+
+## cutile-rs v0.3.0 canonical spot refresh
+
+Date: 2026-08-22
+
+Because Phase 2 adopted no profile changes, only the three regression-gate
+cells were refreshed with the canonical wrappers. Each engine used three
+measured requests after three warmups at default clocks. Prefix caches were
+disabled. SGLang loaded after supplying its missing `libnuma.so.1` runtime
+dependency locally.
+
+| cell / engine | grout | vLLM | SGLang |
+|---|---:|---:|---:|
+| pp=2048, tg=36 e2e (ms) | 568.02 | 567.49 | 584.24 |
+| pp=32768, tg=36 e2e (ms) | 3266.14 | 2933.26 | 3010.73 |
+| pp=18, tg=128 e2e (ms) | 1638.54 | 1640.92 | 1670.31 |
+| pp=18, tg=128 request tok/s | 78.1 | 78.0 | 76.6 |
+
+Grout's direct tg=128 decode rate was 78.9 tok/s. Relative to the previously
+recorded grout cells, pp=2048 improved 3.19%, pp=32768 improved 6.35%, and
+tg=128 moved by +1.10% latency (-1.13% direct decode throughput). The current
+32K residual gap is 11.35% versus vLLM. No slowdown crossed the Phase 1 gate.
+
+The existing canonical table configurations and tuning profiles stand at
+cutile-rs v0.3.0; these spot bundles supersede the three corresponding timing
+cells when reporting the current compiler revision. A full-table reissue is
+not required because no tuning profile changed.
+
+**Regressions found across Phases 1-3: no.**
