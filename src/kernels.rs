@@ -3960,6 +3960,7 @@ pub mod kernels {
 }
 
 #[allow(unused_imports)]
+pub use kernels::_SOURCE_HASH;
 pub use kernels::{
     add_2d_f16, add_rms_norm_decode_bounded_f16,
     add_rms_norm_rows_bounded_spec_f16,

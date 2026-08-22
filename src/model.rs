@@ -206,6 +206,138 @@ fn env_usize_hint_or(var: &str, default: usize) -> Option<usize> {
         .or(Some(default))
 }
 
+/// Blocks until all device work is complete (cuCtxSynchronize). Used by
+/// harnesses that must ensure async frees have landed before large
+/// allocations (e.g. the autotuner's engine reload).
+pub fn device_synchronize() {
+    unsafe {
+        let _ = cu_sys::cuCtxSynchronize();
+    }
+}
+
+/// `sm_<major><minor>` string for a device (tuning-record arch key).
+pub fn device_arch(device_id: usize) -> String {
+    // Idempotent; callers may query before any engine context exists.
+    unsafe {
+        let _ = cu_sys::cuInit(0);
+    }
+    let (major, minor) = device_compute_capability(device_id);
+    format!("sm_{major}{minor}")
+}
+
+/// Tuning-record defaults: env-key -> [(bucket pp, value)], loaded once per
+/// engine from provenance-checked `cutile::tune::Record` files. Precedence
+/// at dispatch is explicit env var > record entry > built-in default.
+#[derive(Default, Debug)]
+pub struct TunedDefaults {
+    by_key: HashMap<String, Vec<(usize, i64)>>,
+}
+
+impl TunedDefaults {
+    /// Loads and verifies all site records under `<dir>/<arch>/*.json`.
+    /// Refused records (provenance mismatch) are skipped with a warning —
+    /// stale winners never silently apply.
+    pub fn load(dir: &Path, arch: &str) -> Self {
+        let mut by_key: HashMap<String, Vec<(usize, i64)>> = HashMap::new();
+        let site_dir = dir.join(arch);
+        let Ok(entries) = std::fs::read_dir(&site_dir) else {
+            return Self::default();
+        };
+        let tileiras =
+            cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(site) = path.file_stem().and_then(|s| s.to_str()).map(String::from)
+            else {
+                continue;
+            };
+            let ws = cutile::tune::Workspace {
+                kernel: site.clone(),
+                source_hash: crate::kernels::_SOURCE_HASH.to_string(),
+                arch: arch.to_string(),
+                tileiras_fingerprint: tileiras.clone(),
+                space_hash: None,
+            };
+            // No stored L2 keys yet (engine-objective records); the
+            // verifier declining (None) leaves provenance fields deciding.
+            match cutile::tune::Record::load_verified(&path, &ws, |_| Ok(None)) {
+                Ok((record, warnings)) => {
+                    for w in &warnings {
+                        eprintln!("tuning record {}: {w}", path.display());
+                    }
+                    for rec_entry in &record.entries {
+                        // bucket labels: "pp=<n>" or "tg=<n>" (decode -> pp 1)
+                        let pp: usize = rec_entry
+                            .bucket
+                            .strip_prefix("pp=")
+                            .and_then(|v: &str| v.parse::<usize>().ok())
+                            .unwrap_or(1);
+                        for (key, value) in &rec_entry.config.params {
+                            if let cutile::tune::ParamValue::Int(v) = value {
+                                by_key.entry(key.clone()).or_default().push((pp, *v));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "tuning record {} refused ({e}); using built-in defaults",
+                        path.display()
+                    );
+                }
+            }
+        }
+        for values in by_key.values_mut() {
+            values.sort_by_key(|(pp, _)| *pp);
+        }
+        Self { by_key }
+    }
+
+    /// The recorded value for `key` at sequence-length bucket `q_len`:
+    /// largest bucket <= q_len, else the smallest bucket. Value 0 means
+    /// "the winner left this knob at its default" and yields None.
+    pub fn get(&self, key: &str, q_len: usize) -> Option<i64> {
+        let values = self.by_key.get(key)?;
+        let picked = values
+            .iter()
+            .rev()
+            .find(|(pp, _)| *pp <= q_len)
+            .or_else(|| values.first())?;
+        (picked.1 != 0).then_some(picked.1)
+    }
+}
+
+fn device_compute_capability(device_id: usize) -> (i32, i32) {
+    unsafe {
+        let mut dev = MaybeUninit::<cu_sys::CUdevice>::uninit();
+        if cu_sys::cuDeviceGet(dev.as_mut_ptr(), device_id as i32)
+            .result()
+            .is_err()
+        {
+            return (0, 0);
+        }
+        let dev = dev.assume_init();
+        let mut major = 0i32;
+        let mut minor = 0i32;
+        let _ = cu_sys::cuDeviceGetAttribute(
+            &mut major,
+            cu_sys::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+            dev,
+        )
+        .result();
+        let _ = cu_sys::cuDeviceGetAttribute(
+            &mut minor,
+            cu_sys::CUdevice_attribute_enum_CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+            dev,
+        )
+        .result();
+        (major, minor)
+    }
+}
+
 fn device_is_sm100(device_id: usize) -> bool {
     unsafe {
         let mut dev = MaybeUninit::<cu_sys::CUdevice>::uninit();
@@ -1289,6 +1421,7 @@ pub struct Qwen3Engine {
     max_seq_len: usize,
     eos_token_ids: Vec<u32>,
     do_sample: bool,
+    tuned: TunedDefaults,
     temperature: f32,
     top_k: usize,
     top_p: f32,
@@ -1454,6 +1587,13 @@ impl Qwen3Engine {
             max_seq_len,
             eos_token_ids,
             do_sample,
+            tuned: TunedDefaults::load(
+                Path::new(
+                    &std::env::var("GROUT_TUNING_RECORD_DIR")
+                        .unwrap_or_else(|_| "benchmarks/tuning".to_string()),
+                ),
+                &device_arch(0),
+            ),
             temperature,
             top_k,
             top_p,
@@ -1470,6 +1610,26 @@ impl Qwen3Engine {
 
     pub fn model_dir(&self) -> &Path {
         &self.model_dir
+    }
+
+    /// Tunable knob resolution: explicit env var > verified tuning record
+    /// (bucketed by q_len) > built-in default.
+    fn tuned_usize(&self, key: &str, q_len: usize, default: usize) -> usize {
+        if std::env::var(key).is_ok() {
+            return env_usize_or(key, default);
+        }
+        self.tuned
+            .get(key, q_len)
+            .map(|v| v as usize)
+            .unwrap_or(default)
+    }
+
+    /// Same precedence for optional hints (None = compiler default).
+    fn tuned_hint(&self, key: &str, q_len: usize) -> Option<usize> {
+        if std::env::var(key).is_ok() {
+            return env_warps(key);
+        }
+        self.tuned.get(key, q_len).map(|v| v as usize)
     }
 
     pub fn set_sampling_enabled(&mut self, enabled: bool) {
@@ -2848,7 +3008,7 @@ impl Qwen3Engine {
                         ])
                         .compile_options(compile_options_with(
                             fmha_decode_occupancy,
-                            env_warps("GROUT_FMHA_DECODE_WARPS"),
+                            self.tuned_hint("GROUT_FMHA_DECODE_WARPS", 1),
                         ))
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
@@ -3414,7 +3574,7 @@ impl Qwen3Engine {
                             ])
                             .compile_options(compile_options_with(
                                 fmha_decode_occupancy,
-                                env_warps("GROUT_FMHA_DECODE_WARPS"),
+                                self.tuned_hint("GROUT_FMHA_DECODE_WARPS", 1),
                             )),
                         )?;
                         let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
@@ -4510,7 +4670,9 @@ impl Qwen3Engine {
         let mut out = out;
         // Q half: wide [BM, 1, HALF_D] tiles over the BM-aligned row
         // prefix, per-row mapped kernel over the remainder rows.
-        let bm = env_usize_or("GROUT_QK_PREFILL_BM", QK_PREFILL_BM_DEFAULT).max(1);
+        let bm = self
+            .tuned_usize("GROUT_QK_PREFILL_BM", seq_len, QK_PREFILL_BM_DEFAULT)
+            .max(1);
         let bulk_rows = seq_len - seq_len % bm;
         let tail_rows = seq_len - bulk_rows;
         // SAFETY: ctx-based execute is the unsafe API surface here; the
@@ -4539,7 +4701,7 @@ impl Qwen3Engine {
                 .grid(((bulk_rows / bm) as u32, attn_heads as u32, 1u32))
                 .compile_options(compile_options_with(
                     None,
-                    env_warps("GROUT_QK_PREFILL_WARPS"),
+                    self.tuned_hint("GROUT_QK_PREFILL_WARPS", seq_len),
                 ))
                 .execute(ctx)?;
             }
@@ -4597,7 +4759,7 @@ impl Qwen3Engine {
                 .grid(((kv_bulk / bm) as u32, kv_heads as u32, 1u32))
                 .compile_options(compile_options_with(
                     None,
-                    env_warps("GROUT_QK_PREFILL_WARPS"),
+                    self.tuned_hint("GROUT_QK_PREFILL_WARPS", seq_len),
                 ))
                 .execute(ctx)?;
             }
@@ -5676,12 +5838,12 @@ impl Qwen3Engine {
         let attn_bn = match position_input {
             PositionInput::Host(_) => {
                 if q_len == 1 {
-                    env_usize_or("GROUT_ATTN_BN_DECODE", ATTN_BN_DECODE)
+                    self.tuned_usize("GROUT_ATTN_BN_DECODE", 1, ATTN_BN_DECODE)
                 } else {
-                    env_usize_or("GROUT_ATTN_BN_PREFILL", ATTN_BN_PREFILL)
+                    self.tuned_usize("GROUT_ATTN_BN_PREFILL", q_len, ATTN_BN_PREFILL)
                 }
             }
-            PositionInput::Device(_) => env_usize_or("GROUT_ATTN_BN_DECODE", ATTN_BN_DECODE),
+            PositionInput::Device(_) => self.tuned_usize("GROUT_ATTN_BN_DECODE", 1, ATTN_BN_DECODE),
         };
         // ATTN_BM split: prefill can have BM>1 to amortize MMA setup; decode
         // is structurally pinned to 1 (q_len=1). Prefill tunable via
@@ -5691,7 +5853,7 @@ impl Qwen3Engine {
                 if q_len == 1 {
                     ATTN_BM_DECODE
                 } else {
-                    env_usize_or("GROUT_ATTN_BM_PREFILL", ATTN_BM_PREFILL)
+                    self.tuned_usize("GROUT_ATTN_BM_PREFILL", q_len, ATTN_BM_PREFILL)
                 }
             }
             PositionInput::Device(_) => ATTN_BM_DECODE,
@@ -5832,7 +5994,7 @@ impl Qwen3Engine {
                             .grid((grid_x, 1u32, 1u32))
                             .compile_options(compile_options_with(
                                 prefill_occupancy,
-                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
                             ))
                             .execute(ctx)?;
                         }
@@ -5858,7 +6020,7 @@ impl Qwen3Engine {
                             .grid((grid_x, 1u32, 1u32))
                             .compile_options(compile_options_with(
                                 prefill_occupancy,
-                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
                             ))
                             .execute(ctx)?;
                         }
@@ -5920,7 +6082,7 @@ impl Qwen3Engine {
                         ])
                         .compile_options(compile_options_with(
                                 prefill_occupancy,
-                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
                             ))
                         .execute(ctx)?
                     };
@@ -5964,7 +6126,7 @@ impl Qwen3Engine {
                         ])
                         .compile_options(compile_options_with(
                                 prefill_occupancy,
-                                env_warps("GROUT_FMHA_PREFILL_WARPS"),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
                             ))
                         .execute(ctx)?
                     };

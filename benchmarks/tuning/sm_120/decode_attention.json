@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "kernel": "decode_attention",
+  "source_hash": "3ab9b9b6ab6a810166e1207862d9d6970500a164ff1de8e0e780917f48a4a7e9",
+  "cutile_version": "0.3.0",
+  "tileiras_fingerprint": "tileiras: NVIDIA (R) Cuda Tile IR optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Fri_May__1_20:03:54_PDT_2026\nCuda compilation tools, release 13.3, V13.3.36\nBuild local.local.37905922_",
+  "arch": "sm_120",
+  "machine": "elibol-blackwell-ubuntu",
+  "created_unix_secs": 1787423358,
+  "space_hash": "336470f99973bcac",
+  "gate": "step-success-v1",
+  "entries": [
+    {
+      "bucket": "tg=128",
+      "config": {
+        "id": "GROUT_ATTN_BN_DECODE=16,GROUT_FMHA_DECODE_WARPS=4,GROUT_FMHA_NUM_KV_SPLITS=4",
+        "params": {
+          "GROUT_ATTN_BN_DECODE": 16,
+          "GROUT_FMHA_DECODE_WARPS": 4,
+          "GROUT_FMHA_NUM_KV_SPLITS": 4
+        }
+      },
+      "median_ms": 1014.1815,
+      "samples": 3,
+      "l2_key": null
+    }
+  ]
+}

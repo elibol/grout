@@ -24,17 +24,17 @@ cuda-bindings = "0.3.0"
 cuda-core = "0.3.0"
 cuda-async = "0.3.0"
 cutile-compiler = "0.3.0"
-cutile = "0.3.0"
+cutile = { version = "0.3.0", features = ["experimental-tune"] }
 
 # Rank-3 mapped partitions + shared index streams (iter_indices_with) for the
 # safe-kernel migration. Drop this section once the feature branch ships in a
 # crates.io release.
 [patch.crates-io]
-cuda-bindings = { path = "../cutile-rs/cuda-bindings" }
-cuda-core = { path = "../cutile-rs/cuda-core" }
-cuda-async = { path = "../cutile-rs/cuda-async" }
-cutile-compiler = { path = "../cutile-rs/cutile-compiler" }
-cutile = { path = "../cutile-rs/cutile" }
+cuda-bindings = { path = "../cutile-rs-v0.3.0/cuda-bindings" }
+cuda-core = { path = "../cutile-rs-v0.3.0/cuda-core" }
+cuda-async = { path = "../cutile-rs-v0.3.0/cuda-async" }
+cutile-compiler = { path = "../cutile-rs-v0.3.0/cutile-compiler" }
+cutile = { path = "../cutile-rs-v0.3.0/cutile" }
 
 [features]
 benchmarks = []
@@ -46,6 +46,11 @@ path = "src/main.rs"
 [[bin]]
 name = "grout_bench"
 path = "benchmarks/src/bin/grout_bench.rs"
+required-features = ["benchmarks"]
+
+[[bin]]
+name = "grout_autotune"
+path = "benchmarks/src/bin/grout_autotune.rs"
 required-features = ["benchmarks"]
 
 [[bin]]
