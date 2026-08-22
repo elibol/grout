@@ -1,0 +1,436 @@
+═══════════════════════════════════════════════════════════════
+ Prefill scan  (pp ∈ {18 128 512 2048 8192}, tg=36)
+ reps=10, reps_long_gt512=3, warmup=3, clock_lock=none
+ grout_tuning_profile=sm120_5090
+ 2026-08-22T13:26:52-0700
+═══════════════════════════════════════════════════════════════
+
+[1;36m==> Generating prompt files at exact token counts[0m
+  pp=18    actual_tokens=18    kind=chat-templated  path=/home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/prompts/pp_18.txt
+  pp=128   actual_tokens=128   kind=synthetic raw   path=/home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/prompts/pp_128.txt
+  pp=512   actual_tokens=512   kind=synthetic raw   path=/home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/prompts/pp_512.txt
+  pp=2048  actual_tokens=2048  kind=synthetic raw   path=/home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/prompts/pp_2048.txt
+  pp=8192  actual_tokens=8192  kind=synthetic raw   path=/home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/prompts/pp_8192.txt
+
+Wrote 5 prompt files to /home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/prompts/
+
+[1;36m==> Benchmark: grout[0m
+
+warning: `grout` (lib) generated 13 warnings
+    Finished `release` profile [optimized] target(s) in 0.06s
+
+--- grout pp=18 tg=36  (reps=10 BM=16 BN_PRE=32 BN_DEC=16 NKS=4 max_seq=4096 GQA=0 LPT=0 GROUP=0 SW=0 SCHED=1 MASK_SPLIT=0) ---
+<|im_start|>assistant
+<think>
+
+</think>
+
+
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=177.2, request_gen_tps=14.0, prompt_s=1.184
+  [warmup] run 1/3: prompt_tokens=18, gen_tokens=36, prefill_ms=6.79, decode_ms=204.53, e2e_ms=211.33, decode_phase_tps=176.0, request_gen_tps=170.3, e2e_tps=255.5
+  [warmup] run 2/3: prompt_tokens=18, gen_tokens=36, prefill_ms=6.82, decode_ms=203.00, e2e_ms=209.83, decode_phase_tps=177.3, request_gen_tps=171.6, e2e_tps=257.3
+  [warmup] run 3/3: prompt_tokens=18, gen_tokens=36, prefill_ms=6.77, decode_ms=202.99, e2e_ms=209.76, decode_phase_tps=177.3, request_gen_tps=171.6, e2e_tps=257.4
+
+  [timed] run 1/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.75, decode_ms=203.03, e2e_ms=209.78, decode_phase_tps=177.3, request_gen_tps=171.6, e2e_tps=257.4
+  [timed] run 2/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.71, decode_ms=203.16, e2e_ms=209.88, decode_phase_tps=177.2, request_gen_tps=171.5, e2e_tps=257.3
+  [timed] run 3/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.71, decode_ms=203.35, e2e_ms=210.06, decode_phase_tps=177.0, request_gen_tps=171.4, e2e_tps=257.1
+  [timed] run 4/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.95, decode_ms=203.05, e2e_ms=210.01, decode_phase_tps=177.3, request_gen_tps=171.4, e2e_tps=257.1
+  [timed] run 5/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.71, decode_ms=203.05, e2e_ms=209.76, decode_phase_tps=177.3, request_gen_tps=171.6, e2e_tps=257.4
+  [timed] run 6/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.73, decode_ms=203.16, e2e_ms=209.89, decode_phase_tps=177.2, request_gen_tps=171.5, e2e_tps=257.3
+  [timed] run 7/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.69, decode_ms=203.13, e2e_ms=209.82, decode_phase_tps=177.2, request_gen_tps=171.6, e2e_tps=257.4
+  [timed] run 8/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.68, decode_ms=203.13, e2e_ms=209.82, decode_phase_tps=177.2, request_gen_tps=171.6, e2e_tps=257.4
+  [timed] run 9/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.72, decode_ms=203.08, e2e_ms=209.80, decode_phase_tps=177.3, request_gen_tps=171.6, e2e_tps=257.4
+  [timed] run 10/10: prompt_tokens=18, gen_tokens=36, prefill_ms=6.69, decode_ms=203.17, e2e_ms=209.87, decode_phase_tps=177.2, request_gen_tps=171.5, e2e_tps=257.3
+  [grout] mean over 10 runs: decode_phase_tps=177.2, request_gen_tps=171.5, e2e_tps=257.3, elapsed=0.210s
+
+--- grout pp=128 tg=36  (reps=10 BM=16 BN_PRE=32 BN_DEC=32 NKS=16 max_seq=4096 GQA=0 LPT=0 GROUP=0 SW=0 SCHED=1 MASK_SPLIT=0) ---
+tuning record benchmarks/tuning/sm_120/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=512" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from /home/elibol/dev/grout/../hf_models/qwen3_4b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [547 chars]
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=179.2, request_gen_tps=9.3, prompt_s=2.625
+  [warmup] run 1/3: prompt_tokens=128, gen_tokens=36, prefill_ms=7.70, decode_ms=202.37, e2e_ms=210.08, decode_phase_tps=177.9, request_gen_tps=171.4, e2e_tps=780.7
+  [warmup] run 2/3: prompt_tokens=128, gen_tokens=36, prefill_ms=7.68, decode_ms=200.98, e2e_ms=208.66, decode_phase_tps=179.1, request_gen_tps=172.5, e2e_tps=786.0
+  [warmup] run 3/3: prompt_tokens=128, gen_tokens=36, prefill_ms=7.66, decode_ms=201.19, e2e_ms=208.85, decode_phase_tps=178.9, request_gen_tps=172.4, e2e_tps=785.2
+
+  [timed] run 1/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.63, decode_ms=201.13, e2e_ms=208.77, decode_phase_tps=179.0, request_gen_tps=172.4, e2e_tps=785.6
+  [timed] run 2/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.63, decode_ms=201.02, e2e_ms=208.65, decode_phase_tps=179.1, request_gen_tps=172.5, e2e_tps=786.0
+  [timed] run 3/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.60, decode_ms=200.91, e2e_ms=208.51, decode_phase_tps=179.2, request_gen_tps=172.7, e2e_tps=786.5
+  [timed] run 4/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.61, decode_ms=201.06, e2e_ms=208.67, decode_phase_tps=179.1, request_gen_tps=172.5, e2e_tps=785.9
+  [timed] run 5/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.60, decode_ms=201.01, e2e_ms=208.62, decode_phase_tps=179.1, request_gen_tps=172.6, e2e_tps=786.1
+  [timed] run 6/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.61, decode_ms=200.99, e2e_ms=208.60, decode_phase_tps=179.1, request_gen_tps=172.6, e2e_tps=786.2
+  [timed] run 7/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.60, decode_ms=201.02, e2e_ms=208.63, decode_phase_tps=179.1, request_gen_tps=172.6, e2e_tps=786.1
+  [timed] run 8/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.59, decode_ms=200.98, e2e_ms=208.58, decode_phase_tps=179.1, request_gen_tps=172.6, e2e_tps=786.3
+  [timed] run 9/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.61, decode_ms=200.94, e2e_ms=208.56, decode_phase_tps=179.2, request_gen_tps=172.6, e2e_tps=786.4
+  [timed] run 10/10: prompt_tokens=128, gen_tokens=36, prefill_ms=7.82, decode_ms=200.98, e2e_ms=208.81, decode_phase_tps=179.1, request_gen_tps=172.4, e2e_tps=785.4
+  [grout] mean over 10 runs: decode_phase_tps=179.1, request_gen_tps=172.5, e2e_tps=786.0, elapsed=0.209s
+
+--- grout pp=512 tg=36  (reps=10 BM=64 BN_PRE=32 BN_DEC=32 NKS=16 max_seq=4096 GQA=0 LPT=0 GROUP=0 SW=0 SCHED=1 MASK_SPLIT=0) ---
+tuning record benchmarks/tuning/sm_120/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=512" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from /home/elibol/dev/grout/../hf_models/qwen3_4b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [2143 chars]
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=176.9, request_gen_tps=9.4, prompt_s=2.563
+  [warmup] run 1/3: prompt_tokens=512, gen_tokens=36, prefill_ms=14.22, decode_ms=203.24, e2e_ms=217.46, decode_phase_tps=177.1, request_gen_tps=165.5, e2e_tps=2520.0
+  [warmup] run 2/3: prompt_tokens=512, gen_tokens=36, prefill_ms=14.23, decode_ms=204.80, e2e_ms=219.04, decode_phase_tps=175.8, request_gen_tps=164.4, e2e_tps=2501.8
+  [warmup] run 3/3: prompt_tokens=512, gen_tokens=36, prefill_ms=14.33, decode_ms=203.26, e2e_ms=217.60, decode_phase_tps=177.1, request_gen_tps=165.4, e2e_tps=2518.4
+
+  [timed] run 1/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.31, decode_ms=203.34, e2e_ms=217.65, decode_phase_tps=177.0, request_gen_tps=165.4, e2e_tps=2517.8
+  [timed] run 2/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.49, decode_ms=203.28, e2e_ms=217.77, decode_phase_tps=177.1, request_gen_tps=165.3, e2e_tps=2516.4
+  [timed] run 3/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.23, decode_ms=203.16, e2e_ms=217.39, decode_phase_tps=177.2, request_gen_tps=165.6, e2e_tps=2520.8
+  [timed] run 4/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.22, decode_ms=203.52, e2e_ms=217.74, decode_phase_tps=176.9, request_gen_tps=165.3, e2e_tps=2516.8
+  [timed] run 5/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.25, decode_ms=203.33, e2e_ms=217.58, decode_phase_tps=177.1, request_gen_tps=165.5, e2e_tps=2518.6
+  [timed] run 6/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.23, decode_ms=203.20, e2e_ms=217.43, decode_phase_tps=177.2, request_gen_tps=165.6, e2e_tps=2520.3
+  [timed] run 7/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.50, decode_ms=203.29, e2e_ms=217.79, decode_phase_tps=177.1, request_gen_tps=165.3, e2e_tps=2516.1
+  [timed] run 8/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.28, decode_ms=203.26, e2e_ms=217.54, decode_phase_tps=177.1, request_gen_tps=165.5, e2e_tps=2519.0
+  [timed] run 9/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.31, decode_ms=203.49, e2e_ms=217.81, decode_phase_tps=176.9, request_gen_tps=165.3, e2e_tps=2516.0
+  [timed] run 10/10: prompt_tokens=512, gen_tokens=36, prefill_ms=14.27, decode_ms=203.30, e2e_ms=217.57, decode_phase_tps=177.1, request_gen_tps=165.5, e2e_tps=2518.7
+  [grout] mean over 10 runs: decode_phase_tps=177.1, request_gen_tps=165.4, e2e_tps=2518.0, elapsed=0.218s
+
+--- grout pp=2048 tg=36  (reps=3 BM=16 BN_PRE=64 BN_DEC=32 NKS=16 max_seq=4096 GQA=0 LPT=1 GROUP=0 SW=8 SCHED=1 MASK_SPLIT=0) ---
+    max_position_embeddings: 262144,
+    tie_word_embeddings: true,
+    use_sliding_window: false,
+    eos_token_id: 151645,
+}
+tuning record benchmarks/tuning/sm_120/decode_attention.json: bucket "tg=128" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/wide_prefill.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=512" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from /home/elibol/dev/grout/../hf_models/qwen3_4b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [8579 chars]
+Generating 36 tokens x 3 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=173.0, request_gen_tps=8.7, prompt_s=2.864
+  [warmup] run 1/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=50.96, decode_ms=208.08, e2e_ms=259.05, decode_phase_tps=173.0, request_gen_tps=139.0, e2e_tps=8044.9
+  [warmup] run 2/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=50.67, decode_ms=208.29, e2e_ms=258.97, decode_phase_tps=172.8, request_gen_tps=139.0, e2e_tps=8047.4
+  [warmup] run 3/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=50.76, decode_ms=208.01, e2e_ms=258.77, decode_phase_tps=173.1, request_gen_tps=139.1, e2e_tps=8053.4
+
+  [timed] run 1/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=51.02, decode_ms=208.05, e2e_ms=259.07, decode_phase_tps=173.0, request_gen_tps=139.0, e2e_tps=8044.1
+  [timed] run 2/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=50.73, decode_ms=208.06, e2e_ms=258.79, decode_phase_tps=173.0, request_gen_tps=139.1, e2e_tps=8052.9
+  [timed] run 3/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=51.01, decode_ms=208.22, e2e_ms=259.24, decode_phase_tps=172.9, request_gen_tps=138.9, e2e_tps=8039.0
+  [grout] mean over 3 runs: decode_phase_tps=173.0, request_gen_tps=139.0, e2e_tps=8045.3, elapsed=0.259s
+
+--- grout pp=8192 tg=36  (reps=3 BM=16 BN_PRE=64 BN_DEC=64 NKS=32 max_seq=8228 GQA=0 LPT=1 GROUP=0 SW=8 SCHED=1 MASK_SPLIT=0) ---
+    max_position_embeddings: 262144,
+    tie_word_embeddings: true,
+    use_sliding_window: false,
+    eos_token_id: 151645,
+}
+tuning record benchmarks/tuning/sm_120/decode_attention.json: bucket "tg=128" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/wide_prefill.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=512" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_120/prefill_attention.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from /home/elibol/dev/grout/../hf_models/qwen3_4b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [34258 chars]
+Generating 36 tokens x 3 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=138.2, request_gen_tps=7.4, prompt_s=3.425
+  [warmup] run 1/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=276.88, decode_ms=260.69, e2e_ms=537.57, decode_phase_tps=138.1, request_gen_tps=67.0, e2e_tps=15305.9
+  [warmup] run 2/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=277.74, decode_ms=260.65, e2e_ms=538.39, decode_phase_tps=138.1, request_gen_tps=66.9, e2e_tps=15282.6
+  [warmup] run 3/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=277.79, decode_ms=260.76, e2e_ms=538.56, decode_phase_tps=138.1, request_gen_tps=66.8, e2e_tps=15277.9
+
+  [timed] run 1/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=277.78, decode_ms=260.46, e2e_ms=538.24, decode_phase_tps=138.2, request_gen_tps=66.9, e2e_tps=15286.8
+  [timed] run 2/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=277.82, decode_ms=260.95, e2e_ms=538.79, decode_phase_tps=138.0, request_gen_tps=66.8, e2e_tps=15271.4
+  [timed] run 3/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=278.11, decode_ms=260.45, e2e_ms=538.56, decode_phase_tps=138.2, request_gen_tps=66.8, e2e_tps=15277.7
+  [grout] mean over 3 runs: decode_phase_tps=138.1, request_gen_tps=66.8, e2e_tps=15278.6, elapsed=0.539s
+
+[1;36m==> Benchmark: SGLang (no-radix)[0m
+
+--- sglang pp=18 tg=36  (reps=10) ---
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+Loading safetensors checkpoint shards:   0% Completed | 0/3 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  33% Completed | 1/3 [00:01<00:02,  1.34s/it]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.20it/s]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.13it/s]
+
+  0%|                                                    | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):   0%|       | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):  14%|▏| 1/7 [00:23<02:23, 23.92s/iCapturing batches (bs=16 avail_mem=3.36 GB):  14%|▏| 1/7 [00:23<02:23, 23.92s/iCapturing batches (bs=12 avail_mem=3.34 GB):  14%|▏| 1/7 [00:23<02:23, 23.92s/iCapturing batches (bs=8 avail_mem=3.34 GB):  14%|▏| 1/7 [00:23<02:23, 23.92s/itCapturing batches (bs=4 avail_mem=3.31 GB):  14%|▏| 1/7 [00:24<02:23, 23.92s/itCapturing batches (bs=4 avail_mem=3.31 GB):  71%|▋| 5/7 [00:24<00:07,  3.59s/itCapturing batches (bs=2 avail_mem=3.31 GB):  71%|▋| 5/7 [00:24<00:07,  3.59s/itCapturing batches (bs=1 avail_mem=3.29 GB):  71%|▋| 5/7 [00:24<00:07,  3.59s/itCapturing batches (bs=1 avail_mem=3.29 GB): 100%|█| 7/7 [00:24<00:00,  3.44s/it
+  [sglang-no-radix] run 1/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.55, request_gen_tps=166.5, total_tps=249.7
+  [sglang-no-radix] run 2/10: prompt_tokens=18, gen_tokens=36, elapsed=0.217s, prefill_ms=13.52, request_gen_tps=166.2, total_tps=249.3
+  [sglang-no-radix] run 3/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.37, request_gen_tps=166.6, total_tps=249.9
+  [sglang-no-radix] run 4/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.37, request_gen_tps=166.4, total_tps=249.5
+  [sglang-no-radix] run 5/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.12, request_gen_tps=166.9, total_tps=250.3
+  [sglang-no-radix] run 6/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.25, request_gen_tps=166.7, total_tps=250.0
+  [sglang-no-radix] run 7/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.27, request_gen_tps=166.7, total_tps=250.1
+  [sglang-no-radix] run 8/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.39, request_gen_tps=166.5, total_tps=249.7
+  [sglang-no-radix] run 9/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.21, request_gen_tps=166.9, total_tps=250.4
+  [sglang-no-radix] run 10/10: prompt_tokens=18, gen_tokens=36, elapsed=0.216s, prefill_ms=13.45, request_gen_tps=166.5, total_tps=249.8
+  [sglang-no-radix] mean over 10 runs: request_gen_tps=166.6, total_tps=249.9, elapsed=0.216s
+
+=================================================================
+ Done.
+=================================================================
+
+--- sglang pp=128 tg=36  (reps=10) ---
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+Loading safetensors checkpoint shards:   0% Completed | 0/3 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  33% Completed | 1/3 [00:01<00:02,  1.33s/it]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.20it/s]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.13it/s]
+
+  0%|                                                    | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):   0%|       | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):  14%|▏| 1/7 [00:00<00:01,  3.67it/Capturing batches (bs=16 avail_mem=3.36 GB):  14%|▏| 1/7 [00:00<00:01,  3.67it/Capturing batches (bs=12 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.67it/Capturing batches (bs=8 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.67it/sCapturing batches (bs=4 avail_mem=3.31 GB):  14%|▏| 1/7 [00:00<00:01,  3.67it/sCapturing batches (bs=4 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 15.59it/sCapturing batches (bs=2 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 15.59it/sCapturing batches (bs=1 avail_mem=3.29 GB):  71%|▋| 5/7 [00:00<00:00, 15.59it/sCapturing batches (bs=1 avail_mem=3.29 GB): 100%|█| 7/7 [00:00<00:00, 16.16it/s
+  [sglang-no-radix] run 1/10: prompt_tokens=128, gen_tokens=36, elapsed=0.220s, prefill_ms=14.76, request_gen_tps=163.9, total_tps=746.7
+  [sglang-no-radix] run 2/10: prompt_tokens=128, gen_tokens=36, elapsed=0.220s, prefill_ms=15.08, request_gen_tps=163.5, total_tps=745.0
+  [sglang-no-radix] run 3/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.68, request_gen_tps=164.1, total_tps=747.5
+  [sglang-no-radix] run 4/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.46, request_gen_tps=164.2, total_tps=747.8
+  [sglang-no-radix] run 5/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.30, request_gen_tps=164.4, total_tps=748.9
+  [sglang-no-radix] run 6/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.27, request_gen_tps=164.2, total_tps=747.8
+  [sglang-no-radix] run 7/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.35, request_gen_tps=164.2, total_tps=748.2
+  [sglang-no-radix] run 8/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.46, request_gen_tps=164.3, total_tps=748.5
+  [sglang-no-radix] run 9/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.30, request_gen_tps=164.3, total_tps=748.7
+  [sglang-no-radix] run 10/10: prompt_tokens=128, gen_tokens=36, elapsed=0.219s, prefill_ms=14.30, request_gen_tps=164.3, total_tps=748.5
+  [sglang-no-radix] mean over 10 runs: request_gen_tps=164.1, total_tps=747.8, elapsed=0.219s
+
+=================================================================
+ Done.
+=================================================================
+
+--- sglang pp=512 tg=36  (reps=10) ---
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+Loading safetensors checkpoint shards:   0% Completed | 0/3 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  33% Completed | 1/3 [00:01<00:02,  1.33s/it]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.20it/s]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.13it/s]
+
+  0%|                                                    | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):   0%|       | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):  14%|▏| 1/7 [00:00<00:01,  3.74it/Capturing batches (bs=16 avail_mem=3.36 GB):  14%|▏| 1/7 [00:00<00:01,  3.74it/Capturing batches (bs=12 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.74it/Capturing batches (bs=8 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.74it/sCapturing batches (bs=4 avail_mem=3.31 GB):  14%|▏| 1/7 [00:00<00:01,  3.74it/sCapturing batches (bs=4 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 15.77it/sCapturing batches (bs=2 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 15.77it/sCapturing batches (bs=1 avail_mem=3.29 GB):  71%|▋| 5/7 [00:00<00:00, 15.77it/sCapturing batches (bs=1 avail_mem=3.29 GB): 100%|█| 7/7 [00:00<00:00, 16.36it/s
+  [sglang-no-radix] run 1/10: prompt_tokens=512, gen_tokens=36, elapsed=0.239s, prefill_ms=29.39, request_gen_tps=150.5, total_tps=2290.9
+  [sglang-no-radix] run 2/10: prompt_tokens=512, gen_tokens=36, elapsed=0.238s, prefill_ms=29.67, request_gen_tps=151.4, total_tps=2304.0
+  [sglang-no-radix] run 3/10: prompt_tokens=512, gen_tokens=36, elapsed=0.238s, prefill_ms=29.17, request_gen_tps=151.3, total_tps=2303.2
+  [sglang-no-radix] run 4/10: prompt_tokens=512, gen_tokens=36, elapsed=0.238s, prefill_ms=29.16, request_gen_tps=151.0, total_tps=2298.0
+  [sglang-no-radix] run 5/10: prompt_tokens=512, gen_tokens=36, elapsed=0.239s, prefill_ms=29.02, request_gen_tps=150.9, total_tps=2297.1
+  [sglang-no-radix] run 6/10: prompt_tokens=512, gen_tokens=36, elapsed=0.239s, prefill_ms=29.20, request_gen_tps=150.8, total_tps=2295.1
+  [sglang-no-radix] run 7/10: prompt_tokens=512, gen_tokens=36, elapsed=0.238s, prefill_ms=29.15, request_gen_tps=151.5, total_tps=2305.9
+  [sglang-no-radix] run 8/10: prompt_tokens=512, gen_tokens=36, elapsed=0.238s, prefill_ms=28.93, request_gen_tps=151.3, total_tps=2302.9
+  [sglang-no-radix] run 9/10: prompt_tokens=512, gen_tokens=36, elapsed=0.238s, prefill_ms=29.24, request_gen_tps=151.0, total_tps=2298.6
+  [sglang-no-radix] run 10/10: prompt_tokens=512, gen_tokens=36, elapsed=0.238s, prefill_ms=28.92, request_gen_tps=151.4, total_tps=2304.4
+  [sglang-no-radix] mean over 10 runs: request_gen_tps=151.1, total_tps=2300.0, elapsed=0.238s
+
+=================================================================
+ Done.
+=================================================================
+
+--- sglang pp=2048 tg=36  (reps=3) ---
+
+=================================================================
+ SGLang benchmark: disable_radix_cache=True
+=================================================================
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+Loading safetensors checkpoint shards:   0% Completed | 0/3 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  33% Completed | 1/3 [00:01<00:02,  1.33s/it]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.20it/s]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.13it/s]
+
+  0%|                                                    | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):   0%|       | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):  14%|▏| 1/7 [00:00<00:01,  3.92it/Capturing batches (bs=16 avail_mem=3.36 GB):  14%|▏| 1/7 [00:00<00:01,  3.92it/Capturing batches (bs=12 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.92it/Capturing batches (bs=8 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.92it/sCapturing batches (bs=4 avail_mem=3.31 GB):  14%|▏| 1/7 [00:00<00:01,  3.92it/sCapturing batches (bs=4 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 16.29it/sCapturing batches (bs=2 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 16.29it/sCapturing batches (bs=1 avail_mem=3.29 GB):  71%|▋| 5/7 [00:00<00:00, 16.29it/sCapturing batches (bs=1 avail_mem=3.29 GB): 100%|█| 7/7 [00:00<00:00, 16.86it/s
+  [sglang-no-radix] run 1/3: prompt_tokens=2048, gen_tokens=36, elapsed=0.305s, prefill_ms=90.84, request_gen_tps=118.0, total_tps=6831.7
+  [sglang-no-radix] run 2/3: prompt_tokens=2048, gen_tokens=36, elapsed=0.304s, prefill_ms=89.98, request_gen_tps=118.3, total_tps=6848.0
+  [sglang-no-radix] run 3/3: prompt_tokens=2048, gen_tokens=36, elapsed=0.305s, prefill_ms=89.90, request_gen_tps=118.1, total_tps=6835.7
+  [sglang-no-radix] mean over 3 runs: request_gen_tps=118.1, total_tps=6838.5, elapsed=0.305s
+
+=================================================================
+ Done.
+=================================================================
+
+--- sglang pp=8192 tg=36  (reps=3) ---
+
+=================================================================
+ SGLang benchmark: disable_radix_cache=True
+=================================================================
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.cudart module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.runtime module instead.
+<frozen importlib._bootstrap_external>:1328: FutureWarning: The cuda.nvrtc module is deprecated and will be removed in a future release, please switch to use the cuda.bindings.nvrtc module instead.
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+Loading safetensors checkpoint shards:   0% Completed | 0/3 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  33% Completed | 1/3 [00:01<00:02,  1.32s/it]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.20it/s]
+Loading safetensors checkpoint shards: 100% Completed | 3/3 [00:02<00:00,  1.13it/s]
+
+  0%|                                                    | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):   0%|       | 0/7 [00:00<?, ?it/s]Capturing batches (bs=24 avail_mem=3.40 GB):  14%|▏| 1/7 [00:00<00:01,  3.72it/Capturing batches (bs=16 avail_mem=3.36 GB):  14%|▏| 1/7 [00:00<00:01,  3.72it/Capturing batches (bs=12 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.72it/Capturing batches (bs=8 avail_mem=3.34 GB):  14%|▏| 1/7 [00:00<00:01,  3.72it/sCapturing batches (bs=4 avail_mem=3.31 GB):  14%|▏| 1/7 [00:00<00:01,  3.72it/sCapturing batches (bs=4 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 15.76it/sCapturing batches (bs=2 avail_mem=3.31 GB):  71%|▋| 5/7 [00:00<00:00, 15.76it/sCapturing batches (bs=1 avail_mem=3.29 GB):  71%|▋| 5/7 [00:00<00:00, 15.76it/sCapturing batches (bs=1 avail_mem=3.29 GB): 100%|█| 7/7 [00:00<00:00, 16.35it/s
+  [sglang-no-radix] run 1/3: prompt_tokens=8192, gen_tokens=36, elapsed=0.668s, prefill_ms=433.59, request_gen_tps=53.9, total_tps=12310.7
+  [sglang-no-radix] run 2/3: prompt_tokens=8192, gen_tokens=36, elapsed=0.670s, prefill_ms=434.62, request_gen_tps=53.7, total_tps=12281.6
+  [sglang-no-radix] run 3/3: prompt_tokens=8192, gen_tokens=36, elapsed=0.668s, prefill_ms=433.93, request_gen_tps=53.9, total_tps=12313.8
+  [sglang-no-radix] mean over 3 runs: request_gen_tps=53.8, total_tps=12302.1, elapsed=0.669s
+
+=================================================================
+ Done.
+=================================================================
+
+[1;36m==> Benchmark: vLLM (cuda-graph, prefix-cache OFF)[0m
+
+--- vllm pp=18 tg=36  (reps=10) ---
+(EngineCore pid=2390231) 2026-08-22 13:30:33,614 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=2390231) 2026-08-22 13:30:33,628 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=2390231) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:01, 38.73it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  18%|█▊        | 9/51 [00:00<00:01, 41.37it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  27%|██▋       | 14/51 [00:00<00:00, 43.26it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:00<00:00, 47.48it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████     | 26/51 [00:00<00:00, 51.05it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  65%|██████▍   | 33/51 [00:00<00:00, 55.72it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 41/51 [00:00<00:00, 56.91it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  96%|█████████▌| 49/51 [00:00<00:00, 61.86it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:00<00:00, 53.77it/s]
+(EngineCore pid=2390231) Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 6/35 [00:00<00:00, 55.42it/s]Capturing CUDA graphs (decode, FULL):  37%|███▋      | 13/35 [00:00<00:00, 59.74it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:00<00:00, 65.56it/s]Capturing CUDA graphs (decode, FULL):  86%|████████▌ | 30/35 [00:00<00:00, 72.33it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:00<00:00, 71.05it/s]
+(EngineCore pid=2390231) INFO 08-22 13:30:35 [gpu_model_runner.py:5746] Graph capturing finished in 2 secs, took 0.38 GiB
+(EngineCore pid=2390231) INFO 08-22 13:30:35 [gpu_worker.py:617] CUDA graph pool memory: 0.38 GiB (actual), 0.44 GiB (estimated), difference: 0.06 GiB (16.4%).
+(EngineCore pid=2390231) INFO 08-22 13:30:35 [core.py:281] init engine (profile, create kv cache, warmup model) took 6.67 seconds
+INFO 08-22 13:30:36 [llm.py:391] Supported tasks: ['generate']
+(EngineCore pid=2390231) INFO 08-22 13:30:39 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=2390231) INFO 08-22 13:30:39 [core.py:1224] Shutdown complete
+  [cuda-graph] run 1/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.55, request_gen_tps=163.4, total_tps=245.2
+  [cuda-graph] run 2/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.30, request_gen_tps=163.5, total_tps=245.2
+  [cuda-graph] run 3/10: prompt_tokens=18, gen_tokens=36, elapsed=0.221s, prefill_ms=7.40, request_gen_tps=163.2, total_tps=244.9
+  [cuda-graph] run 4/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.45, request_gen_tps=163.3, total_tps=244.9
+  [cuda-graph] run 5/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.18, request_gen_tps=163.6, total_tps=245.4
+  [cuda-graph] run 6/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.20, request_gen_tps=163.7, total_tps=245.6
+  [cuda-graph] run 7/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.35, request_gen_tps=163.8, total_tps=245.7
+  [cuda-graph] run 8/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.17, request_gen_tps=163.8, total_tps=245.6
+  [cuda-graph] run 9/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.42, request_gen_tps=163.6, total_tps=245.4
+  [cuda-graph] run 10/10: prompt_tokens=18, gen_tokens=36, elapsed=0.220s, prefill_ms=7.18, request_gen_tps=163.6, total_tps=245.4
+  [cuda-graph] mean over 10 runs: request_gen_tps=163.6, total_tps=245.3, elapsed=0.220s
+
+=================================================================
+ Done.
+=================================================================
+
+--- vllm pp=128 tg=36  (reps=10) ---
+(EngineCore pid=2390519) 2026-08-22 13:30:50,569 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=2390519) 2026-08-22 13:30:50,573 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=2390519) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:01, 38.90it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  18%|█▊        | 9/51 [00:00<00:01, 41.44it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  27%|██▋       | 14/51 [00:00<00:00, 43.31it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:00<00:00, 47.47it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████     | 26/51 [00:00<00:00, 51.06it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  65%|██████▍   | 33/51 [00:00<00:00, 55.70it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 41/51 [00:00<00:00, 58.36it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  96%|█████████▌| 49/51 [00:00<00:00, 63.25it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:00<00:00, 54.63it/s]
+(EngineCore pid=2390519) Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 6/35 [00:00<00:00, 55.27it/s]Capturing CUDA graphs (decode, FULL):  37%|███▋      | 13/35 [00:00<00:00, 59.25it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:00<00:00, 65.12it/s]Capturing CUDA graphs (decode, FULL):  86%|████████▌ | 30/35 [00:00<00:00, 72.03it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:00<00:00, 70.74it/s]
+(EngineCore pid=2390519) INFO 08-22 13:30:52 [gpu_model_runner.py:5746] Graph capturing finished in 2 secs, took 0.38 GiB
+(EngineCore pid=2390519) INFO 08-22 13:30:52 [gpu_worker.py:617] CUDA graph pool memory: 0.38 GiB (actual), 0.44 GiB (estimated), difference: 0.06 GiB (16.4%).
+(EngineCore pid=2390519) INFO 08-22 13:30:52 [core.py:281] init engine (profile, create kv cache, warmup model) took 6.39 seconds
+INFO 08-22 13:30:53 [llm.py:391] Supported tasks: ['generate']
+(EngineCore pid=2390519) INFO 08-22 13:30:56 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=2390519) INFO 08-22 13:30:56 [core.py:1224] Shutdown complete
+  [cuda-graph] run 1/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.44, request_gen_tps=162.4, total_tps=739.9
+  [cuda-graph] run 2/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.33, request_gen_tps=162.3, total_tps=739.3
+  [cuda-graph] run 3/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.55, request_gen_tps=162.3, total_tps=739.4
+  [cuda-graph] run 4/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.34, request_gen_tps=162.4, total_tps=739.7
+  [cuda-graph] run 5/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.60, request_gen_tps=162.2, total_tps=739.0
+  [cuda-graph] run 6/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.28, request_gen_tps=162.2, total_tps=738.7
+  [cuda-graph] run 7/10: prompt_tokens=128, gen_tokens=36, elapsed=0.223s, prefill_ms=8.40, request_gen_tps=161.5, total_tps=735.7
+  [cuda-graph] run 8/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.77, request_gen_tps=162.3, total_tps=739.5
+  [cuda-graph] run 9/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.45, request_gen_tps=162.3, total_tps=739.6
+  [cuda-graph] run 10/10: prompt_tokens=128, gen_tokens=36, elapsed=0.222s, prefill_ms=8.33, request_gen_tps=162.5, total_tps=740.2
+  [cuda-graph] mean over 10 runs: request_gen_tps=162.2, total_tps=739.1, elapsed=0.222s
+
+=================================================================
+ Done.
+=================================================================
+
+--- vllm pp=512 tg=36  (reps=10) ---
+(EngineCore pid=2390786) 2026-08-22 13:31:07,585 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=2390786) 2026-08-22 13:31:07,589 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=2390786) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:01, 38.78it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  18%|█▊        | 9/51 [00:00<00:01, 41.33it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  27%|██▋       | 14/51 [00:00<00:00, 43.23it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:00<00:00, 47.33it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████     | 26/51 [00:00<00:00, 50.96it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  65%|██████▍   | 33/51 [00:00<00:00, 55.59it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 41/51 [00:00<00:00, 58.22it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  96%|█████████▌| 49/51 [00:00<00:00, 63.07it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:00<00:00, 54.50it/s]
+(EngineCore pid=2390786) Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 6/35 [00:00<00:00, 54.98it/s]Capturing CUDA graphs (decode, FULL):  37%|███▋      | 13/35 [00:00<00:00, 59.11it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:00<00:00, 64.98it/s]Capturing CUDA graphs (decode, FULL):  86%|████████▌ | 30/35 [00:00<00:00, 71.92it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:00<00:00, 70.56it/s]
+(EngineCore pid=2390786) INFO 08-22 13:31:09 [gpu_model_runner.py:5746] Graph capturing finished in 2 secs, took 0.38 GiB
+(EngineCore pid=2390786) INFO 08-22 13:31:09 [gpu_worker.py:617] CUDA graph pool memory: 0.38 GiB (actual), 0.44 GiB (estimated), difference: 0.06 GiB (16.4%).
+(EngineCore pid=2390786) INFO 08-22 13:31:09 [core.py:281] init engine (profile, create kv cache, warmup model) took 6.40 seconds
+INFO 08-22 13:31:10 [llm.py:391] Supported tasks: ['generate']
+(EngineCore pid=2390786) INFO 08-22 13:31:13 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=2390786) INFO 08-22 13:31:13 [core.py:1224] Shutdown complete
+  [cuda-graph] run 1/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=22.76, request_gen_tps=152.5, total_tps=2320.8
+  [cuda-graph] run 2/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=22.80, request_gen_tps=152.2, total_tps=2317.3
+  [cuda-graph] run 3/10: prompt_tokens=512, gen_tokens=36, elapsed=0.237s, prefill_ms=22.82, request_gen_tps=151.9, total_tps=2312.6
+  [cuda-graph] run 4/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=22.60, request_gen_tps=152.3, total_tps=2318.9
+  [cuda-graph] run 5/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=23.04, request_gen_tps=152.3, total_tps=2318.5
+  [cuda-graph] run 6/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=22.56, request_gen_tps=152.2, total_tps=2317.4
+  [cuda-graph] run 7/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=22.83, request_gen_tps=152.4, total_tps=2320.4
+  [cuda-graph] run 8/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=22.48, request_gen_tps=152.3, total_tps=2318.4
+  [cuda-graph] run 9/10: prompt_tokens=512, gen_tokens=36, elapsed=0.236s, prefill_ms=22.70, request_gen_tps=152.4, total_tps=2319.4
+  [cuda-graph] run 10/10: prompt_tokens=512, gen_tokens=36, elapsed=0.237s, prefill_ms=22.78, request_gen_tps=151.8, total_tps=2310.8
+  [cuda-graph] mean over 10 runs: request_gen_tps=152.2, total_tps=2317.5, elapsed=0.236s
+
+=================================================================
+ Done.
+=================================================================
+
+--- vllm pp=2048 tg=36  (reps=3) ---
+(EngineCore pid=2391097) INFO 08-22 13:31:23 [kv_cache_utils.py:826] Overriding num_gpu_blocks=0 with num_gpu_blocks_override=512
+(EngineCore pid=2391097) INFO 08-22 13:31:23 [gpu_model_runner.py:5607] Profiling CUDA graph memory: PIECEWISE=51 (largest=512), FULL=35 (largest=256)
+(EngineCore pid=2391097) INFO 08-22 13:31:24 [gpu_model_runner.py:5686] Estimated CUDA graph memory: 0.44 GiB total
+(EngineCore pid=2391097) INFO 08-22 13:31:24 [gpu_worker.py:456] Available KV cache memory: 16.61 GiB
+(EngineCore pid=2391097) INFO 08-22 13:31:24 [gpu_worker.py:490] In v0.19, CUDA graph memory profiling will be enabled by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), which more accurately accounts for CUDA graph memory during KV cache allocation. To try it now, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase --gpu-memory-utilization from 0.8000 to 0.8141 to maintain the same effective KV cache size.
+(EngineCore pid=2391097) INFO 08-22 13:31:24 [kv_cache_utils.py:1316] GPU KV cache size: 120,944 tokens
+(EngineCore pid=2391097) INFO 08-22 13:31:24 [kv_cache_utils.py:1321] Maximum concurrency for 16,384 tokens per request: 7.38x
+(EngineCore pid=2391097) 2026-08-22 13:31:24,938 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=2391097) 2026-08-22 13:31:24,942 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=2391097) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:01, 38.81it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  18%|█▊        | 9/51 [00:00<00:01, 40.95it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  27%|██▋       | 14/51 [00:00<00:00, 43.08it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:00<00:00, 47.25it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████     | 26/51 [00:00<00:00, 50.95it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  65%|██████▍   | 33/51 [00:00<00:00, 55.60it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 41/51 [00:00<00:00, 58.34it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  96%|█████████▌| 49/51 [00:00<00:00, 63.19it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:00<00:00, 54.48it/s]
+(EngineCore pid=2391097) Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 6/35 [00:00<00:00, 54.96it/s]Capturing CUDA graphs (decode, FULL):  37%|███▋      | 13/35 [00:00<00:00, 58.94it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:00<00:00, 64.70it/s]Capturing CUDA graphs (decode, FULL):  86%|████████▌ | 30/35 [00:00<00:00, 71.53it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:00<00:00, 70.24it/s]
+(EngineCore pid=2391097) INFO 08-22 13:31:26 [gpu_model_runner.py:5746] Graph capturing finished in 2 secs, took 0.38 GiB
+(EngineCore pid=2391097) INFO 08-22 13:31:26 [gpu_worker.py:617] CUDA graph pool memory: 0.38 GiB (actual), 0.44 GiB (estimated), difference: 0.06 GiB (16.4%).
+(EngineCore pid=2391097) INFO 08-22 13:31:26 [core.py:281] init engine (profile, create kv cache, warmup model) took 6.39 seconds
+INFO 08-22 13:31:27 [llm.py:391] Supported tasks: ['generate']
+(EngineCore pid=2391097) INFO 08-22 13:31:29 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=2391097) INFO 08-22 13:31:29 [core.py:1224] Shutdown complete
+  [cuda-graph] run 1/3: prompt_tokens=2048, gen_tokens=36, elapsed=0.302s, prefill_ms=85.04, request_gen_tps=119.2, total_tps=6899.9
+  [cuda-graph] run 2/3: prompt_tokens=2048, gen_tokens=36, elapsed=0.303s, prefill_ms=84.95, request_gen_tps=119.0, total_tps=6886.8
+  [cuda-graph] run 3/3: prompt_tokens=2048, gen_tokens=36, elapsed=0.303s, prefill_ms=84.98, request_gen_tps=119.0, total_tps=6887.6
+  [cuda-graph] mean over 3 runs: request_gen_tps=119.0, total_tps=6891.5, elapsed=0.302s
+
+=================================================================
+ Done.
+=================================================================
+
+--- vllm pp=8192 tg=36  (reps=3) ---
+(EngineCore pid=2391364) INFO 08-22 13:31:39 [kv_cache_utils.py:826] Overriding num_gpu_blocks=0 with num_gpu_blocks_override=512
+(EngineCore pid=2391364) INFO 08-22 13:31:39 [gpu_model_runner.py:5607] Profiling CUDA graph memory: PIECEWISE=51 (largest=512), FULL=35 (largest=256)
+(EngineCore pid=2391364) INFO 08-22 13:31:40 [gpu_model_runner.py:5686] Estimated CUDA graph memory: 0.44 GiB total
+(EngineCore pid=2391364) INFO 08-22 13:31:41 [gpu_worker.py:456] Available KV cache memory: 16.61 GiB
+(EngineCore pid=2391364) INFO 08-22 13:31:41 [gpu_worker.py:490] In v0.19, CUDA graph memory profiling will be enabled by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), which more accurately accounts for CUDA graph memory during KV cache allocation. To try it now, set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase --gpu-memory-utilization from 0.8000 to 0.8141 to maintain the same effective KV cache size.
+(EngineCore pid=2391364) INFO 08-22 13:31:41 [kv_cache_utils.py:1316] GPU KV cache size: 120,944 tokens
+(EngineCore pid=2391364) INFO 08-22 13:31:41 [kv_cache_utils.py:1321] Maximum concurrency for 16,384 tokens per request: 7.38x
+(EngineCore pid=2391364) 2026-08-22 13:31:41,181 - INFO - autotuner.py:262 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=2391364) 2026-08-22 13:31:41,185 - INFO - autotuner.py:268 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=2391364) Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   0%|          | 0/51 [00:00<?, ?it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):   8%|▊         | 4/51 [00:00<00:01, 38.68it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  18%|█▊        | 9/51 [00:00<00:01, 41.26it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  27%|██▋       | 14/51 [00:00<00:00, 43.19it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  39%|███▉      | 20/51 [00:00<00:00, 47.37it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  51%|█████     | 26/51 [00:00<00:00, 51.00it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  65%|██████▍   | 33/51 [00:00<00:00, 55.60it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  80%|████████  | 41/51 [00:00<00:00, 58.35it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE):  96%|█████████▌| 49/51 [00:00<00:00, 63.21it/s]Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 100%|██████████| 51/51 [00:00<00:00, 54.57it/s]
+(EngineCore pid=2391364) Capturing CUDA graphs (decode, FULL):   0%|          | 0/35 [00:00<?, ?it/s]Capturing CUDA graphs (decode, FULL):  17%|█▋        | 6/35 [00:00<00:00, 55.21it/s]Capturing CUDA graphs (decode, FULL):  37%|███▋      | 13/35 [00:00<00:00, 59.43it/s]Capturing CUDA graphs (decode, FULL):  60%|██████    | 21/35 [00:00<00:00, 65.28it/s]Capturing CUDA graphs (decode, FULL):  86%|████████▌ | 30/35 [00:00<00:00, 72.12it/s]Capturing CUDA graphs (decode, FULL): 100%|██████████| 35/35 [00:00<00:00, 70.85it/s]
+(EngineCore pid=2391364) INFO 08-22 13:31:43 [gpu_model_runner.py:5746] Graph capturing finished in 2 secs, took 0.38 GiB
+(EngineCore pid=2391364) INFO 08-22 13:31:43 [gpu_worker.py:617] CUDA graph pool memory: 0.38 GiB (actual), 0.44 GiB (estimated), difference: 0.06 GiB (16.4%).
+(EngineCore pid=2391364) INFO 08-22 13:31:43 [core.py:281] init engine (profile, create kv cache, warmup model) took 6.38 seconds
+INFO 08-22 13:31:43 [llm.py:391] Supported tasks: ['generate']
+(EngineCore pid=2391364) INFO 08-22 13:31:50 [core.py:1201] Shutdown initiated (timeout=0)
+(EngineCore pid=2391364) INFO 08-22 13:31:50 [core.py:1224] Shutdown complete
+  [cuda-graph] run 1/3: prompt_tokens=8192, gen_tokens=36, elapsed=0.650s, prefill_ms=405.23, request_gen_tps=55.4, total_tps=12654.7
+  [cuda-graph] run 2/3: prompt_tokens=8192, gen_tokens=36, elapsed=0.650s, prefill_ms=405.15, request_gen_tps=55.4, total_tps=12664.6
+  [cuda-graph] run 3/3: prompt_tokens=8192, gen_tokens=36, elapsed=0.652s, prefill_ms=406.15, request_gen_tps=55.2, total_tps=12625.5
+  [cuda-graph] mean over 3 runs: request_gen_tps=55.3, total_tps=12648.3, elapsed=0.651s
+
+=================================================================
+ Done.
+=================================================================
+
+[1;36m==> Aggregating prefill scan[0m
+wrote /home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/aggregate.csv
+wrote /home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652/aggregate.md
+
+Done. Results in: /home/elibol/dev/grout/benchmarks/results/sweep/20260822_132652
+  run.jsonl, aggregate.csv, aggregate.md
