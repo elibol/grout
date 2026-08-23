@@ -20,16 +20,26 @@ the KernelKind prime path at model load.
   GROUT_FMHA_PREFILL_WARPS / GROUT_FMHA_DECODE_WARPS /
   GROUT_QK_PREFILL_WARPS).
 
-## Phase 1 — warmup via `.compile()`
+## Phase 1 — warmup (DONE, revised design)
 
-Replace the KernelKind prime path's dummy launches with `.compile()`
-calls for every engine kernel at its production generics. Keep the
-CUDA-graph capture step (that genuinely needs launches); everything else
-(the zeros-tensor allocations, the shape-binding hazards that once
-produced the silent-corruption bug, the serialized compile order) goes
-away. Single-flight cache admits compiling kernels concurrently at model
-load. Acceptance: identical post-warmup behavior, model-load time equal
-or better, prime-path code deleted.
+Implemented as the **persistent on-disk JIT store**
+(`cutile_compiler::jit_cache`, enabled at engine load; GROUT_JIT_CACHE=0
+opts out, GROUT_JIT_CACHE_DIR overrides the default location): every
+startup after the first serves all kernel compiles from disk
+(stage2_source=disk for all 37 engine kernels; measured model-ready time
+3.25 s -> 1.29 s on the 5090/4B).
+
+Deliberate deviation from the original plan: the KernelKind prime path's
+executor-driven launches are RETAINED rather than replaced with
+meta-tensor `.compile()` calls. The executors are the dispatch-fidelity
+anchor — they compute the exact generics/compile-options the real run
+uses (including record-driven values), so a hand-mirrored compile list
+would reintroduce the warm-list/dispatch drift class of bug. Once
+compiles are disk-served, the prime launches cost microseconds; the
+`.compile()` conversion would now save allocation of a handful of tiny
+dummy tensors and nothing else. Revisit only if cutile-rs grows a
+compile-only execute terminal on the same launcher builders the
+executors use.
 
 ## Phase 2 — in-binary autotuning
 

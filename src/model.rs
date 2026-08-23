@@ -1453,6 +1453,22 @@ pub struct Qwen3Engine {
 
 impl Qwen3Engine {
     pub async fn load(model_dir: &Path, max_seq_len: Option<usize>) -> Result<Self> {
+        // Persistent JIT cache (cutile-rs 0.3.0): compiled kernels are
+        // stored on disk (default location, LRU-evicted), so every startup
+        // after the first skips tileiras entirely and warm_all_kernels
+        // reduces to cache loads + the launches the CUDA-graph capture
+        // genuinely needs. GROUT_JIT_CACHE=0 opts out (e.g., for compiler
+        // benchmarking, where cold JIT is the measurement).
+        if env_bool_or("GROUT_JIT_CACHE", true) {
+            let enabled = match std::env::var("GROUT_JIT_CACHE_DIR") {
+                Ok(dir) => cutile_compiler::jit_cache::FileSystemJitStore::new(dir)
+                    .map(|s| cutile_compiler::jit_cache::enable(std::sync::Arc::new(s))),
+                Err(_) => cutile_compiler::jit_cache::enable_default(),
+            };
+            if let Err(e) = enabled {
+                eprintln!("persistent JIT cache unavailable ({e}); continuing without");
+            }
+        }
         model_dir.try_exists()?;
         let cfg = Qwen3Config::from_model_dir(model_dir)?;
         let generation_cfg = GenerationConfig::from_model_dir(model_dir)?;
