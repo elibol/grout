@@ -1,0 +1,6 @@
+{"engine":"grout","variant":"default","pp":8192,"tg":36,"rep":0,"prompt_tokens":8192,"gen_tokens":36,"prefill_ms":85.123,"decode_ms":145.648,"e2e_ms":230.787}
+{"engine":"grout","variant":"default","pp":8192,"tg":36,"rep":1,"prompt_tokens":8192,"gen_tokens":36,"prefill_ms":82.422,"decode_ms":144.229,"e2e_ms":226.667}
+{"engine":"grout","variant":"default","pp":8192,"tg":36,"rep":2,"prompt_tokens":8192,"gen_tokens":36,"prefill_ms":82.722,"decode_ms":148.426,"e2e_ms":231.164}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 8192, "tg": 36, "rep": 0, "prompt_tokens": 8192, "gen_tokens": 36, "e2e_ms": 214.06156099692453, "prefill_ms": 88.11615000013262}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 8192, "tg": 36, "rep": 1, "prompt_tokens": 8192, "gen_tokens": 36, "e2e_ms": 210.30875999713317, "prefill_ms": 89.07244200236164}
+{"engine": "vllm", "variant": "cuda-graph", "pp": 8192, "tg": 36, "rep": 2, "prompt_tokens": 8192, "gen_tokens": 36, "e2e_ms": 205.98960199276917, "prefill_ms": 92.10058899770956}
