@@ -311,6 +311,20 @@ struct EngineOracle<'a> {
     log: fs::File,
 }
 
+/// All tuner engines must run a fixed decode window: with EOS active, a
+/// "128-token" candidate trial measures however many tokens that sample
+/// happened to emit, and the winner is not comparable to a fixed-length
+/// shipping run (found the hard way in the sm_100 parity gate).
+fn load_engine(
+    rt: &tokio::runtime::Runtime,
+    model_dir: &Path,
+    max_seq_len: usize,
+) -> Result<Qwen3Engine> {
+    let mut engine = rt.block_on(Qwen3Engine::load(model_dir, Some(max_seq_len)))?;
+    engine.set_ignore_eos(true);
+    Ok(engine)
+}
+
 fn is_alloc_failure(e: &anyhow::Error) -> bool {
     let msg = format!("{e:#}");
     msg.contains("ALLOC_FAILED") || msg.contains("OUT_OF_MEMORY") || msg.contains("OutOfMemory")
@@ -328,10 +342,7 @@ impl EngineOracle<'_> {
         // would hold two engines resident and OOM the reload itself.
         self.engine = None;
         grout::model::device_synchronize();
-        self.engine = Some(self.rt.block_on(Qwen3Engine::load(
-            &self.model_dir,
-            Some(self.max_seq_len),
-        ))?);
+        self.engine = Some(load_engine(self.rt, &self.model_dir, self.max_seq_len)?);
         Ok(())
     }
 
@@ -442,10 +453,8 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     let model_dir = PathBuf::from(&args.model);
-    let mut engine_slot: Option<Qwen3Engine> = Some(rt.block_on(Qwen3Engine::load(
-        &model_dir,
-        Some(args.max_seq_len),
-    ))?);
+    let mut engine_slot: Option<Qwen3Engine> =
+        Some(load_engine(&rt, &model_dir, args.max_seq_len)?);
 
     let tileiras = cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string();
 
@@ -503,7 +512,7 @@ fn main() -> Result<()> {
                 configs: configs.clone(),
                 engine: Some(match engine_slot.take() {
                     Some(e) => e,
-                    None => rt.block_on(Qwen3Engine::load(&model_dir, Some(args.max_seq_len)))?,
+                    None => load_engine(&rt, &model_dir, args.max_seq_len)?,
                 }),
                 model_dir: model_dir.clone(),
                 max_seq_len: args.max_seq_len,

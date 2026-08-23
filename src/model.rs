@@ -2486,7 +2486,9 @@ impl Qwen3Engine {
         let max_seq_len = self.max_seq_len;
         let qk_scale = 1.0f32 / (head_dim as f32).sqrt();
         let query_group_size = self.cfg.num_kv_groups() as i32;
-        let attn_bn = env_usize_or("GROUT_ATTN_BN_DECODE", ATTN_BN_DECODE);
+        // Decode tuning records are bucketed at pp=1; a raw env read here
+        // would silently bypass verified records on the graph path.
+        let attn_bn = self.tuned_usize("GROUT_ATTN_BN_DECODE", 1, ATTN_BN_DECODE);
         let use_flash_decode = env_bool_or("GROUT_FLASH_DECODE", false);
         // BLOCK_SIZE ablation knob for decode add_rms_norm only.
         let rms_block = env_usize_or("GROUT_RMS_BLOCK", ADD_RMS_DECODE_BLOCK);
@@ -2541,7 +2543,7 @@ impl Qwen3Engine {
         // noise; picked 8 to keep short-kv cases gentle). See
         // FMHA_NUM_KV_SPLITS_DEFAULT.
         let fmha_num_kv_splits =
-            env_usize_or("GROUT_FMHA_NUM_KV_SPLITS", FMHA_NUM_KV_SPLITS_DEFAULT);
+            self.tuned_usize("GROUT_FMHA_NUM_KV_SPLITS", 1, FMHA_NUM_KV_SPLITS_DEFAULT);
         let fmha_decode_latency =
             env_usize_or("GROUT_FMHA_DECODE_LATENCY", FMHA_DECODE_LATENCY_DEFAULT);
         let fmha_decode_occupancy =
