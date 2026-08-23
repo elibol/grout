@@ -146,8 +146,16 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
             ],
             // Canonical decode cells use a short prompt; tuning in a long
             // kv context (the first attempt used pp=512) skews winners.
+            //
+            // The bucket is labeled by max_seq_len, not tg: split-kv
+            // geometry partitions the ALLOCATED cache (kv_len_per_split =
+            // ceil(max_seq_len / splits)), so the NKS optimum is a
+            // function of the engine's max_seq_len. The sm_100 gate
+            // proved a winner tuned at msl=16384 does not transfer to
+            // the canonical msl=4096 engine. Tune once per max_seq_len
+            // the deployment uses; records coexist as separate buckets.
             buckets: vec![Bucket {
-                label: "tg=128".into(),
+                label: format!("msl={max_seq_len}"),
                 prompt_pp: 18,
                 max_new_tokens: 128,
                 decode_objective: true,

@@ -285,10 +285,17 @@ impl TunedDefaults {
                         eprintln!("tuning record {}: {w}", path.display());
                     }
                     for rec_entry in &record.entries {
-                        // bucket labels: "pp=<n>" or "tg=<n>" (decode -> pp 1)
+                        // bucket labels: "pp=<n>" (prefill, queried by
+                        // q_len), "msl=<n>" (decode, queried by the
+                        // engine's max_seq_len — split-kv geometry
+                        // partitions the allocated cache, so decode
+                        // optima are max_seq_len-relative), or legacy
+                        // "tg=<n>" (decode -> bucket 1; matches any
+                        // max_seq_len query as the smallest bucket).
                         let pp: usize = rec_entry
                             .bucket
                             .strip_prefix("pp=")
+                            .or_else(|| rec_entry.bucket.strip_prefix("msl="))
                             .and_then(|v: &str| v.parse::<usize>().ok())
                             .unwrap_or(1);
                         for (key, value) in &rec_entry.config.params {
@@ -2486,9 +2493,11 @@ impl Qwen3Engine {
         let max_seq_len = self.max_seq_len;
         let qk_scale = 1.0f32 / (head_dim as f32).sqrt();
         let query_group_size = self.cfg.num_kv_groups() as i32;
-        // Decode tuning records are bucketed at pp=1; a raw env read here
-        // would silently bypass verified records on the graph path.
-        let attn_bn = self.tuned_usize("GROUT_ATTN_BN_DECODE", 1, ATTN_BN_DECODE);
+        // Decode tuning records are bucketed by max_seq_len (split-kv
+        // geometry is allocation-relative); a raw env read here would
+        // silently bypass verified records on the graph path.
+        let attn_bn =
+            self.tuned_usize("GROUT_ATTN_BN_DECODE", self.max_seq_len, ATTN_BN_DECODE);
         let use_flash_decode = env_bool_or("GROUT_FLASH_DECODE", false);
         // BLOCK_SIZE ablation knob for decode add_rms_norm only.
         let rms_block = env_usize_or("GROUT_RMS_BLOCK", ADD_RMS_DECODE_BLOCK);
@@ -2542,8 +2551,11 @@ impl Qwen3Engine {
         // Default tuned at tg=512 (BN=32/NKS=16 and BN=32/NKS=8 within
         // noise; picked 8 to keep short-kv cases gentle). See
         // FMHA_NUM_KV_SPLITS_DEFAULT.
-        let fmha_num_kv_splits =
-            self.tuned_usize("GROUT_FMHA_NUM_KV_SPLITS", 1, FMHA_NUM_KV_SPLITS_DEFAULT);
+        let fmha_num_kv_splits = self.tuned_usize(
+            "GROUT_FMHA_NUM_KV_SPLITS",
+            self.max_seq_len,
+            FMHA_NUM_KV_SPLITS_DEFAULT,
+        );
         let fmha_decode_latency =
             env_usize_or("GROUT_FMHA_DECODE_LATENCY", FMHA_DECODE_LATENCY_DEFAULT);
         let fmha_decode_occupancy =
@@ -3054,7 +3066,7 @@ impl Qwen3Engine {
                         ])
                         .compile_options(compile_options_with(
                             fmha_decode_occupancy,
-                            self.tuned_hint("GROUT_FMHA_DECODE_WARPS", 1),
+                            self.tuned_hint("GROUT_FMHA_DECODE_WARPS", self.max_seq_len),
                         ))
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
@@ -3620,7 +3632,7 @@ impl Qwen3Engine {
                             ])
                             .compile_options(compile_options_with(
                                 fmha_decode_occupancy,
-                                self.tuned_hint("GROUT_FMHA_DECODE_WARPS", 1),
+                                self.tuned_hint("GROUT_FMHA_DECODE_WARPS", self.max_seq_len),
                             )),
                         )?;
                         let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
