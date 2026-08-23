@@ -10,7 +10,8 @@ use cutile::tile_kernel::TileKernel;
 use cutile::{api, core::f16};
 
 use grout::kernels::{
-    fmha_prefill_causal_mapped, fmha_prefill_gqa_lpt, fmha_prefill_gqa_lpt_split,
+    fmha_prefill_causal_mapped, fmha_prefill_causal_mapped_unchecked_twin,
+    fmha_prefill_gqa_lpt_checked, fmha_prefill_gqa_lpt_split,
     fmha_prefill_gqa_mapped, prefill_splitk_reduce_merge,
 };
 
@@ -120,7 +121,9 @@ async fn main() -> Result<()> {
     );
 
     let mode = args.mode.trim().to_ascii_lowercase();
-    if mode != "causal" && mode != "gqa" && mode != "gqa-lpt" && mode != "gqa-lpt-split" {
+    if mode != "causal" && mode != "causal-unchecked" && mode != "gqa" && mode != "gqa-lpt"
+        && mode != "gqa-lpt-split"
+    {
         bail!(
             "unknown --mode `{}`; expected causal, gqa, gqa-lpt, or gqa-lpt-split",
             args.mode
@@ -515,25 +518,21 @@ fn launch_attention(
             let swizzle = lpt_swizzle(args, num_head_groups);
             let num_hb_quotient = num_head_groups / swizzle;
             let num_hb_remainder = (num_head_groups % swizzle).max(1);
-            let out_ptr = out.device_pointer().clone();
-            unsafe {
-                fmha_prefill_gqa_lpt(
-                    q.device_pointer().clone(),
-                    k.device_pointer().clone(),
-                    v.device_pointer().clone(),
-                    out_ptr,
-                    value(qk_scale),
-                    value(qgs as i32),
-                    value(args.q_len as i32),
-                    value(args.q_len as i32),
-                    value(0i32),
-                    value(num_q_blocks as i32),
-                    value(num_head_groups as i32),
-                    value(swizzle as i32),
-                    value(num_hb_quotient as i32),
-                    value(num_hb_remainder as i32),
-                )
-            }
+            fmha_prefill_gqa_lpt_checked(
+                &*q,
+                &*k,
+                &*v,
+                &out,
+                value(qk_scale),
+                value(qgs as i32),
+                value(args.q_len as i32),
+                value(0i32),
+                value(num_q_blocks as i32),
+                value(num_head_groups as i32),
+                value(swizzle as i32),
+                value(num_hb_quotient as i32),
+                value(num_hb_remainder as i32),
+            )
             .generics(vec![
                 args.bm.to_string(),
                 args.bn.to_string(),
@@ -551,7 +550,7 @@ fn launch_attention(
                 cutile::tile_kernel::CompileOptions::default().occupancy(args.occupancy as i32),
             )
             .sync_on(stream)
-            .map_err(|e| anyhow!("fmha_prefill_gqa_lpt failed: {e:?}"))?;
+            .map_err(|e| anyhow!("fmha_prefill_gqa_lpt_checked failed: {e:?}"))?;
             return Ok(out);
         }
         ensure!(
@@ -591,6 +590,40 @@ fn launch_attention(
         )
         .sync_on(stream)
         .map_err(|e| anyhow!("fmha_prefill_gqa_mapped failed: {e:?}"))?;
+        Ok(result.0.unpartition())
+    } else if mode == "causal-unchecked" {
+        let ntb = (args.q_len.div_ceil(args.bm) * args.q_heads) as u32;
+        let out_part = out.partition([args.bm, 1, args.head_dim]).map([1, 1, 1], ntb);
+        // SAFETY: exact-body twin of the checked kernel; identical inputs
+        // and launch geometry, differing only in unchecked_accesses.
+        let result = unsafe {
+            fmha_prefill_causal_mapped_unchecked_twin(
+                value(out_part),
+                value(q.clone()),
+                value(k.clone()),
+                value(v.clone()),
+                value(qk_scale),
+                value(qgs as i32),
+                value(args.q_len as i32),
+                value(0i32),
+            )
+        }
+        .generics(vec![
+            args.bm.to_string(),
+            args.bn.to_string(),
+            args.head_dim.to_string(),
+            1.to_string(),
+            even_k.to_string(),
+            args.latency.to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+        ])
+        .compile_options(
+            cutile::tile_kernel::CompileOptions::default().occupancy(args.occupancy as i32),
+        )
+        .sync_on(stream)
+        .map_err(|e| anyhow!("fmha_prefill_causal_mapped_unchecked_twin failed: {e:?}"))?;
         Ok(result.0.unpartition())
     } else {
         let ntb = (args.q_len.div_ceil(args.bm) * args.q_heads) as u32;
