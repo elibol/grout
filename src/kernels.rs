@@ -94,6 +94,76 @@ pub mod kernels {
         }
     }
 
+    /// DIAGNOSTIC no-deny variant of gemm_persistent_f16 (paper exp4
+    /// ablations: deny refuses CUTILE_FORCE_DEVICE_CHECKS). Same body.
+#[cutile::entry(
+        optimization_hints = (
+            sm_100 = (num_cta_in_cga = 2,),
+            sm_120 = (num_cta_in_cga = 2,),
+        ),
+        // deny dropped: force-device ablation target (paper exp4)
+    )]
+    fn gemm_persistent_nodeny_f16<
+        const BM: i32,
+        const BN: i32,
+        const BK: i32,
+        const MAP_SHAPE: [i32; 2],
+    >(
+        mut z: MappedPartitionMut<f16, { [BM, BN] }, MAP_SHAPE>,
+        x: &Tensor<f16, { [-1, -1] }>,
+        y: &Tensor<f16, { [-1, -1] }>,
+    ) {
+        let part_x = x.partition(const_shape![BM, BK]);
+        let part_y = y.partition(const_shape![BK, BN]);
+
+        for out_idx in z.iter_indices() {
+            let (bid_m, bid_n) = out_idx.components();
+            let mut tile_z: Tile<f16, { [BM, BN] }> =
+                constant(f16::ZERO, const_shape![BM, BN]);
+            for k_tile in 0i32..num_tiles(&part_x, 1) {
+                let tile_x = part_x.load([bid_m, k_tile]);
+                let tile_y = part_y.load([k_tile, bid_n]);
+                tile_z = mma(tile_x, tile_y, tile_z);
+            }
+            z.store(tile_z, out_idx);
+        }
+    }
+
+    /// DIAGNOSTIC exact-body unchecked twin of gemm_persistent_f16
+    /// (paper exp4). Never engine-dispatched.
+#[cutile::entry(
+        optimization_hints = (
+            sm_100 = (num_cta_in_cga = 2,),
+            sm_120 = (num_cta_in_cga = 2,),
+        ),
+        unchecked_accesses = true,
+    )]
+    unsafe fn gemm_persistent_unchecked_f16<
+        const BM: i32,
+        const BN: i32,
+        const BK: i32,
+        const MAP_SHAPE: [i32; 2],
+    >(
+        mut z: MappedPartitionMut<f16, { [BM, BN] }, MAP_SHAPE>,
+        x: &Tensor<f16, { [-1, -1] }>,
+        y: &Tensor<f16, { [-1, -1] }>,
+    ) {
+        let part_x = x.partition(const_shape![BM, BK]);
+        let part_y = y.partition(const_shape![BK, BN]);
+
+        for out_idx in z.iter_indices() {
+            let (bid_m, bid_n) = out_idx.components();
+            let mut tile_z: Tile<f16, { [BM, BN] }> =
+                constant(f16::ZERO, const_shape![BM, BN]);
+            for k_tile in 0i32..num_tiles(&part_x, 1) {
+                let tile_x = part_x.load([bid_m, k_tile]);
+                let tile_y = part_y.load([k_tile, bid_n]);
+                tile_z = mma(tile_x, tile_y, tile_z);
+            }
+            z.store(tile_z, out_idx);
+        }
+    }
+
     unsafe fn load_f16_ptr(
         ptrs: &Tensor<i64, { [-1] }>,
         group_id: i32,
@@ -4116,6 +4186,7 @@ pub use kernels::{
     group_gemm_f16_nt_desc, kv_cache_update_f16, kv_cache_update_seq_dynpos_mapped_f16,
     kv_cache_update_seq_mapped_f16, lm_head_argmax_blocks_f16, prefill_splitk_reduce_merge,
     fmha_prefill_causal_mapped_unchecked_twin,
+    gemm_persistent_nodeny_f16, gemm_persistent_unchecked_f16,
     fmha_prefill_gqa_lpt_raw_resurrected, fmha_prefill_gqa_lpt_unchecked_twin,
     k_norm_rope_v_prefill_f16, k_norm_rope_v_prefill_wide_f16, q_norm_rope_prefill_f16,
     q_norm_rope_prefill_wide_f16,
