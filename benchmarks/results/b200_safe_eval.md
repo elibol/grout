@@ -1484,3 +1484,62 @@ As a confirmation outside the gate, explicitly exporting the saved winner
 (1716.39 ms direct decode), still 5.33% slower than shipping. The record set
 must not ship until the tuner uses a fixed decode window, the CUDA-graph path
 applies all recorded decode axes, and the parity gate is rerun.
+
+## sm_100 fixed-window decode retune and parity rerun
+
+Date: 2026-08-23
+
+- grout: `bc89d81` (`safe-kernels`)
+- cutile-rs: `v0.3.0`-equivalent internal tag `__sync_pubtag_v0.3.0`
+  (`0839fe4`)
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B, default clocks
+- prompt source: `benchmarks/results/sweep/20260822_132652/prompts`
+
+Status: **FAIL — both prior decode bugs are fixed, but the fresh record loses
+the canonical fixed-128-token shipping cell by 6.24%.** Per the gate rule, the
+new decode record is not committed.
+
+### Fresh decode retune
+
+The variable-token `decode_attention.json` and
+`decode_attention.tg=128.trials.jsonl` were deleted before tuning. Both release
+binaries were rebuilt from `bc89d81`, then `autotune_loop.sh` ran only the
+decode site with three repetitions and `max-seq-len=16384`. Coverage passed,
+all 32 candidates were measured, and the wrapper exited cleanly after one run
+with no restart or invalid candidate.
+
+The fixed-window medians now form a tight 2226.77--2248.54 ms range, unlike
+the EOS-corrupted prior log. The selected record is
+`BN=16/NKS=32/default-warps` at 2226.77 ms. The shipping incumbent
+`BN=32/NKS=4/default-warps` measured 2234.09 ms in that tuning workload, so
+the selected record is 0.33% faster there.
+
+The retained prefill and wide-prefill records were not changed, but startup
+now refuses them because their `3ab9b9...` aggregate source hash predates the
+current `d12832...` kernel source hash. They remain local as requested and
+were not used as record defaults in this parity rerun.
+
+### Canonical decode parity
+
+The parity cell used the shipping wrapper's canonical
+`max-seq-len=4096`, pp=18, exactly 128 generated tokens, one discarded warmup,
+and three measurements per invocation. Three paired rounds used
+records/built-ins/shipping, shipping/built-ins/records, then
+records/built-ins/shipping order.
+
+| metric | records rounds (ms) | built-ins rounds (ms) | shipping rounds (ms) | overall records / built-ins / shipping (ms) | records vs shipping | gate |
+|---|---:|---:|---:|---:|---:|---|
+| tg=128 e2e | 1748.07 / 1747.96 / 1747.98 | 1737.59 / 1737.65 / 1737.64 | 1645.23 / 1645.34 / 1645.41 | 1748.00 / 1737.63 / 1645.33 | +6.24% | **FAIL** |
+| tg=128 direct decode | 1731.60 / 1731.50 / 1731.52 | 1721.14 / 1721.19 / 1721.19 | 1628.77 / 1628.86 / 1628.95 | 1731.54 / 1721.17 / 1628.86 | +6.30% | **FAIL** |
+
+The record is now observably active: it is about 10.4 ms slower than built-ins,
+rather than collapsing to the built-in result as before. This validates the
+CUDA-graph record-resolution fix. Every tuning candidate also ran a fixed
+128-token window, validating the EOS fix.
+
+The remaining failure is a workload-specialization mismatch. The required
+tuning command builds and measures a graph at `max-seq-len=16384`, while the
+canonical tg=128 wrapper builds its graph at 4096. `NKS=32` is within noise of
+the winner at 16384 but loses decisively to shipping `NKS=4` at 4096. The
+decode bucket must tune at the canonical graph bound, or persistence must
+bucket on that bound, before this record can ship.
