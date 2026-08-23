@@ -131,9 +131,10 @@ fn time_arm(
     Ok(start.elapsed().as_secs_f64() * 1e6 / args.iters as f64)
 }
 
-fn median(values: &mut [f64]) -> f64 {
+fn quartiles(values: &mut [f64]) -> (f64, f64, f64) {
     values.sort_by(f64::total_cmp);
-    values[values.len() / 2]
+    let q = |f: f64| values[((values.len() - 1) as f64 * f).round() as usize];
+    (q(0.25), q(0.5), q(0.75))
 }
 
 fn main() -> Result<()> {
@@ -150,7 +151,7 @@ fn main() -> Result<()> {
         .map(|s| s.trim().parse::<usize>().context("bad --sizes"))
         .collect::<Result<_>>()?;
 
-    println!("n,arm,avg_us_median,samples,iters,bm,bn,bk");
+    println!("n,arm,p25_us,median_us,p75_us,samples,iters,bm,bn,bk");
     for &n in &sizes {
         let host_random = |seed: u32| -> Arc<Vec<f16>> {
             let mut v = Vec::with_capacity(n * n);
@@ -239,10 +240,10 @@ fn main() -> Result<()> {
             }
         }
         for (arm, mut ts) in med {
+            let (p25, p50, p75) = quartiles(&mut ts);
             println!(
-                "{n},{},{:.3},{},{},{},{},{}",
+                "{n},{},{p25:.3},{p50:.3},{p75:.3},{},{},{},{},{}",
                 arm.name(),
-                median(&mut ts),
                 args.samples,
                 args.iters,
                 args.bm,
