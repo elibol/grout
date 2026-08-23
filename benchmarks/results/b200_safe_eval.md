@@ -1405,3 +1405,82 @@ complete shipping profile, so its tuner win is not validated for deployment.
 No invalid-candidate family needs compiler follow-up from this run. The
 blocking issues are search-space, bucket-workload, joint-record, and shipping
 parity coverage.
+
+## sm_100 rebuilt-space autotuning parity gate
+
+Date: 2026-08-23
+
+- grout tuning parent: `6a8c7f8` (`safe-kernels`)
+- cutile-rs: `v0.3.0`-equivalent internal tag `__sync_pubtag_v0.3.0`
+  (`0839fe4`)
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B, default clocks
+- prompt source: `benchmarks/results/sweep/20260822_132652/prompts`
+
+Status: **FAIL — rebuilt records pass both prefill cells but lose the fixed
+128-token decode cell to the shipping profile by 5.59%.** Per the gate rule,
+the generated record files are not committed and the sm_100 profile scripts
+remain unchanged.
+
+### Restart-wrapper tuning run
+
+`autotune_loop.sh` resumed the existing trial logs and exited cleanly after
+one run, with no restart. All three startup coverage assertions passed. The
+final spaces contain 128 unique measured candidates per prefill-attention
+bucket, 32 for decode, and 12 per wide-prefill bucket. Two historical
+wide-prefill allocation failures were retried successfully during the resumed
+run, so every unique final candidate has a measured result.
+
+| site / bucket | selected configuration | tuner median (ms) |
+|---|---|---:|
+| prefill attention, pp=512 | LPT=1, BM=16, BN=64, occupancy=2, warps=4 | 31.46 |
+| prefill attention, pp=2048 | LPT=1, BM=16, BN=128, occupancy=2, warps=4 | 107.71 |
+| prefill attention, pp=8192 | LPT=0, BM=16, BN=128, occupancy=2, warps=default | 470.71 |
+| decode attention, tg=128 | BN=64, NKS=32, warps=4 | 600.35 |
+| wide prefill, pp=2048 | BM=16, warps=2 | 109.27 |
+| wide prefill, pp=8192 | BM=16, warps=2 | 617.34 |
+
+### Three-arm paired parity gate
+
+Each arm invocation loaded Qwen3-32B, ran one discarded warmup, and recorded
+three measured repetitions. The three rounds used
+records/built-ins/shipping, shipping/built-ins/records, then
+records/built-ins/shipping order. Prefill used exact raw prompts and zero
+generated tokens. Decode used the canonical 18-token prompt, exactly 128
+generated tokens, and `ignore-eos`. Built-ins set
+`GROUT_TUNING_RECORD_DIR=/nonexistent`; shipping also disabled records and
+used the cell values resolved from `sweep_pp_sm100.sh` or
+`sweep_tg_sm100.sh`.
+
+Values are per-round means of three measurements. Prefill rows use pure
+prefill latency; the decode row uses request e2e latency. Overall values are
+means over all nine measurements for each arm.
+
+| cell / metric | records rounds (ms) | built-ins rounds (ms) | shipping rounds (ms) | overall records / built-ins / shipping (ms) | records vs shipping | gate |
+|---|---:|---:|---:|---:|---:|---|
+| pp=2048 prefill | 138.29 / 138.33 / 141.19 | 141.64 / 141.39 / 144.13 | 139.11 / 142.08 / 142.50 | 139.27 / 142.39 / 141.23 | -1.39% | **PASS** |
+| pp=8192 prefill | 623.45 / 624.39 / 627.91 | 636.87 / 637.19 / 634.90 | 627.37 / 627.35 / 626.62 | 625.25 / 636.32 / 627.12 | -0.30% | **PASS** |
+| pp=18, tg=128 e2e | 1737.09 / 1737.31 / 1737.22 | 1737.68 / 1737.62 / 1737.51 | 1645.25 / 1645.29 / 1645.22 | 1737.21 / 1737.60 / 1645.25 | +5.59% | **FAIL** |
+
+Decode direct time independently shows the same failure: records average
+1721.24 ms versus shipping at 1628.79 ms (+5.68%).
+
+### Decode failure diagnosis
+
+The rebuilt search space contains the shipping `BN=32/NKS=4/default-warps`
+candidate, but the decode objective is not comparable across candidates.
+`grout_autotune` asks for at most 128 tokens without disabling EOS termination;
+its trial log has candidate minima and medians ranging independently (for
+example 373.23/780.83 ms), reflecting variable generated-token counts. The
+recorded 600.35 ms winner is therefore not a fixed-128-token result.
+
+There is also a record-application bug in the CUDA-graph path. The graph
+builder resolves `GROUT_ATTN_BN_DECODE` and
+`GROUT_FMHA_NUM_KV_SPLITS` directly with `env_usize_or`, bypassing
+`TunedDefaults`; only the recorded worker-warp hint is consulted. This matches
+the gate observation that records and built-ins are effectively identical.
+
+As a confirmation outside the gate, explicitly exporting the saved winner
+(`BN=64/NKS=32/warps=4`) for a fixed 128-token run averaged 1732.88 ms e2e
+(1716.39 ms direct decode), still 5.33% slower than shipping. The record set
+must not ship until the tuner uses a fixed decode window, the CUDA-graph path
+applies all recorded decode axes, and the parity gate is rerun.
