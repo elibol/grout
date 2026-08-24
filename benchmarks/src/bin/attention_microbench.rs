@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use clap::Parser;
-use cuda_async::device_operation::{DeviceOp, value, with_context};
+use cuda_async::device_operation::{value, with_context, DeviceOp};
 use cuda_core::Stream;
 use cutile::tensor::{IntoPartition, Reshape, Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
@@ -11,8 +11,8 @@ use cutile::{api, core::f16};
 
 use grout::kernels::{
     fmha_prefill_causal_mapped, fmha_prefill_causal_mapped_unchecked_twin,
-    fmha_prefill_gqa_lpt_checked, fmha_prefill_gqa_lpt_split,
-    fmha_prefill_gqa_mapped, prefill_splitk_reduce_merge,
+    fmha_prefill_gqa_lpt_checked, fmha_prefill_gqa_lpt_split, fmha_prefill_gqa_mapped,
+    prefill_splitk_reduce_merge,
 };
 
 #[derive(Parser, Debug)]
@@ -85,6 +85,11 @@ struct Args {
     /// Check output against a CPU reference. Intended for small shapes.
     #[arg(long)]
     check: bool,
+
+    /// Print an FNV-1a hash of the output tensor bytes (stderr) for
+    /// cross-arm bitwise comparison; inputs are deterministic by index.
+    #[arg(long, default_value_t = false)]
+    output_hash: bool,
 }
 
 struct Buffers {
@@ -121,7 +126,10 @@ async fn main() -> Result<()> {
     );
 
     let mode = args.mode.trim().to_ascii_lowercase();
-    if mode != "causal" && mode != "causal-unchecked" && mode != "gqa" && mode != "gqa-lpt"
+    if mode != "causal"
+        && mode != "causal-unchecked"
+        && mode != "gqa"
+        && mode != "gqa-lpt"
         && mode != "gqa-lpt-split"
     {
         bail!(
@@ -157,6 +165,33 @@ async fn main() -> Result<()> {
             buffers.lse_partial.as_mut(),
         )?;
         check_attention(&stream, &args, &buffers, checked_out)?;
+        buffers.out = alloc_zeros(&stream, &[args.q_len, args.q_heads, args.head_dim], "out")?;
+    }
+    if args.output_hash {
+        let out = std::mem::replace(
+            &mut buffers.out,
+            alloc_zeros(&stream, &[args.q_len, args.q_heads, args.head_dim], "out")?,
+        );
+        let hashed_out = launch_attention(
+            &stream,
+            &args,
+            &mode,
+            out,
+            &buffers.q,
+            &buffers.k,
+            &buffers.v,
+            buffers.att_partial.as_mut(),
+            buffers.lse_partial.as_mut(),
+        )?;
+        let host: Vec<f16> = hashed_out.to_host_vec().sync_on(&stream)?;
+        let mut h: u64 = 0xcbf29ce484222325;
+        for v in &host {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        eprintln!("output_hash={h:016x}");
         buffers.out = alloc_zeros(&stream, &[args.q_len, args.q_heads, args.head_dim], "out")?;
     }
 
@@ -593,7 +628,9 @@ fn launch_attention(
         Ok(result.0.unpartition())
     } else if mode == "causal-unchecked" {
         let ntb = (args.q_len.div_ceil(args.bm) * args.q_heads) as u32;
-        let out_part = out.partition([args.bm, 1, args.head_dim]).map([1, 1, 1], ntb);
+        let out_part = out
+            .partition([args.bm, 1, args.head_dim])
+            .map([1, 1, 1], ntb);
         // SAFETY: exact-body twin of the checked kernel; identical inputs
         // and launch geometry, differing only in unchecked_accesses.
         let result = unsafe {
@@ -627,7 +664,9 @@ fn launch_attention(
         Ok(result.0.unpartition())
     } else {
         let ntb = (args.q_len.div_ceil(args.bm) * args.q_heads) as u32;
-        let out_part = out.partition([args.bm, 1, args.head_dim]).map([1, 1, 1], ntb);
+        let out_part = out
+            .partition([args.bm, 1, args.head_dim])
+            .map([1, 1, 1], ntb);
         let result = fmha_prefill_causal_mapped(
             value(out_part),
             value(q.clone()),

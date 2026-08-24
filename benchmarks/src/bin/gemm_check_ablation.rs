@@ -45,6 +45,9 @@ struct Args {
     iters: usize,
     #[arg(long, default_value_t = 3)]
     warmup_iters: usize,
+    /// Also print one raw row per (sample, arm): sample,<n>,<arm>,<idx>,<us>
+    #[arg(long, default_value_t = false)]
+    emit_samples: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -82,8 +85,8 @@ fn launch(
         "1".to_string(),
     ];
     let _ = n;
-    let mapped_z = cutile::tensor::PartitionMut::partition(z, [args.bm, args.bn])
-        .map([8, 1], grid_x);
+    let mapped_z =
+        cutile::tensor::PartitionMut::partition(z, [args.bm, args.bn]).map([8, 1], grid_x);
     match arm {
         // SAFETY: async_on is the unsafe launch API; buffers outlive the
         // stream sync that follows every timing window.
@@ -158,7 +161,9 @@ fn main() -> Result<()> {
             let mut st = seed;
             for _ in 0..n * n {
                 st = st.wrapping_mul(1664525).wrapping_add(1013904223);
-                v.push(f16::from_f32(((st >> 8) as f32 / (1u32 << 24) as f32) - 0.5));
+                v.push(f16::from_f32(
+                    ((st >> 8) as f32 / (1u32 << 24) as f32) - 0.5,
+                ));
             }
             Arc::new(v)
         };
@@ -191,7 +196,7 @@ fn main() -> Result<()> {
         for arm in [Arm::Checked, Arm::Forced, Arm::Unchecked] {
             let mut z = api::zeros::<f16>(&[n, n])
                 .sync_on(&stream)
-            .map_err(|e| anyhow!("alloc z: {e:?}"))?;
+                .map_err(|e| anyhow!("alloc z: {e:?}"))?;
             if arm == Arm::Forced {
                 // SAFETY: single-threaded harness.
                 unsafe { std::env::set_var("CUTILE_FORCE_DEVICE_CHECKS", "1") };
@@ -236,6 +241,9 @@ fn main() -> Result<()> {
             };
             for arm in order {
                 let t = time_arm(arm, &stream, n, &args, grid_x, &x, &y, &mut z)?;
+                if args.emit_samples {
+                    println!("sample,{n},{},{s},{t:.3}", arm.name());
+                }
                 med.iter_mut().find(|(a, _)| *a == arm).unwrap().1.push(t);
             }
         }
