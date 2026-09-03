@@ -1287,237 +1287,239 @@ pub mod kernels {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_idx = pid.0;
         let total_tiles: i32 = num_q_blocks * num_head_groups;
-        if tile_idx >= total_tiles {
-            return;
-        }
+        // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+        // returns below the top level; the old lowering fell through).
+        if tile_idx < total_tiles {
 
-        let sched: (i32, i32, i32) = if SCHED == 1i32 {
-            {
-                let block: i32 = tile_idx / num_head_groups;
-                let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
-                (block, q_head_group_idx, 1i32)
-            }
-        } else {
-            if SCHED == 2i32 {
+            let sched: (i32, i32, i32) = if SCHED == 1i32 {
                 {
-                    let q_head_group_idx: i32 = tile_idx / num_q_blocks;
-                    let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                    let block: i32 = tile_idx / num_head_groups;
+                    let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
                     (block, q_head_group_idx, 1i32)
                 }
             } else {
-                {
-                    let l2_major_blocks: i32 = swizzle * num_q_blocks;
-                    let bidhb: i32 = tile_idx / l2_major_blocks;
-                    let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
-                    let head_group_span: i32 = if bidhb < num_hb_quotient {
-                        swizzle
-                    } else {
-                        num_hb_remainder
-                    };
-                    let block: i32 = l2_mod / head_group_span;
-                    let bidhb_residual: i32 = l2_mod - block * head_group_span;
-                    let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
-                    let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
-                    (block, q_head_group_idx, reverse)
-                }
-            }
-        };
-        let block: i32 = sched.0;
-        let q_head_group_idx: i32 = sched.1;
-        if q_head_group_idx >= num_head_groups {
-            return;
-        }
-        let q_m_idx: i32 = if sched.2 == 1i32 {
-            num_q_blocks - 1i32 - block
-        } else {
-            block
-        };
-        let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
-
-        let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
-        let log2: f32 = tile_to_scalar(log(two));
-        let qk_scale_log2: f32 = qk_scale / log2;
-        let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
-        let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
-
-        let offs_m_base: i32 = query_start + q_m_idx * BM;
-        let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
-        let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
-        let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
-            iota_bm_col.broadcast(const_shape![BM, GROUP]);
-        let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
-        let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
-        let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
-        let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
-
-        let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-        let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
-            .reshape(const_shape![1, BN])
-            .broadcast(const_shape![M_EFF, BN]);
-        let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
-        let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
-            - constant(1.0e30f32, const_shape![M_EFF, BN]);
-
-        let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
-        let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
-        let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
-        let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
-
-        let q_part: Partition<f16, { [BM, GROUP, D] }> =
-            q.partition(const_shape![BM, GROUP, D]);
-        let tq_raw: Tile<f16, { [BM, GROUP, D] }> =
-            q_part.load_pipelined::<LATENCY>([q_m_idx, q_head_group_idx, 0i32]);
-        let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
-
-        let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
-        let k_seqlen_tiles: i32 = kv_len / BN;
-        let mut mask_start: i32 = k_seqlen_tiles;
-        let mut tc: i32 = ceil_div(kv_len, BN);
-        if CAUSAL == 1i32 {
-            mask_start = (query_start + q_m_idx * BM) / BN;
-            mask_start = min(mask_start, k_seqlen_tiles);
-            tc = ceil_div(min(m_end, kv_len), BN);
-        }
-
-        let k_part: Partition<f16, { [1, BN, D] }> = k.partition(const_shape![1, BN, D]);
-        let v_part: Partition<f16, { [1, BN, D] }> = v.partition(const_shape![1, BN, D]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-
-        if MASK_SPLIT == 1i32 && CAUSAL == 1i32 {
-            for j in 0i32..mask_start {
-                let k_tile: Tile<f16, { [1, BN, D] }> =
-                    k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
-
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> =
-                    v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
-            }
-            for j in mask_start..tc {
-                let k_tile: Tile<f16, { [1, BN, D] }> =
-                    k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                let offs_n: Tile<i32, { [M_EFF, BN] }> =
-                    broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
-                let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
-                if EVEN_K == 0i32 {
-                    let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
-                    mask = mask & lt_res;
-                }
-                let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
-                mask = mask & ge_res;
-                let mask_true: Tile<f32, { [M_EFF, BN] }> =
-                    constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = qk + select(mask, mask_true, mask_false);
-
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
-
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> =
-                    v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
-            }
-        } else {
-            for j in 0i32..tc {
-                let k_tile: Tile<f16, { [1, BN, D] }> =
-                    k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
-                    let offs_n: Tile<i32, { [M_EFF, BN] }> =
-                        broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
-                    let mut mask: Tile<bool, { [M_EFF, BN] }> =
-                        constant(true, const_shape![M_EFF, BN]);
-                    if EVEN_K == 0i32 {
-                        let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
-                        mask = mask & lt_res;
+                if SCHED == 2i32 {
+                    {
+                        let q_head_group_idx: i32 = tile_idx / num_q_blocks;
+                        let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                        (block, q_head_group_idx, 1i32)
                     }
-                    if CAUSAL == 1i32 {
+                } else {
+                    {
+                        let l2_major_blocks: i32 = swizzle * num_q_blocks;
+                        let bidhb: i32 = tile_idx / l2_major_blocks;
+                        let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
+                        let head_group_span: i32 = if bidhb < num_hb_quotient {
+                            swizzle
+                        } else {
+                            num_hb_remainder
+                        };
+                        let block: i32 = l2_mod / head_group_span;
+                        let bidhb_residual: i32 = l2_mod - block * head_group_span;
+                        let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
+                        let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
+                        (block, q_head_group_idx, reverse)
+                    }
+                }
+            };
+            let block: i32 = sched.0;
+            let q_head_group_idx: i32 = sched.1;
+            // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+            // returns below the top level; the old lowering fell through).
+            if q_head_group_idx < num_head_groups {
+                let q_m_idx: i32 = if sched.2 == 1i32 {
+                    num_q_blocks - 1i32 - block
+                } else {
+                    block
+                };
+                let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
+
+                let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
+                let log2: f32 = tile_to_scalar(log(two));
+                let qk_scale_log2: f32 = qk_scale / log2;
+                let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
+                let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
+
+                let offs_m_base: i32 = query_start + q_m_idx * BM;
+                let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
+                let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
+                let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
+                    iota_bm_col.broadcast(const_shape![BM, GROUP]);
+                let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
+                let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
+                let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
+                let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
+
+                let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+                let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
+                    .reshape(const_shape![1, BN])
+                    .broadcast(const_shape![M_EFF, BN]);
+                let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
+                let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
+                    - constant(1.0e30f32, const_shape![M_EFF, BN]);
+
+                let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
+                let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
+                let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
+                let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
+
+                let q_part: Partition<f16, { [BM, GROUP, D] }> =
+                    q.partition(const_shape![BM, GROUP, D]);
+                let tq_raw: Tile<f16, { [BM, GROUP, D] }> =
+                    q_part.load_pipelined::<LATENCY>([q_m_idx, q_head_group_idx, 0i32]);
+                let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
+
+                let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
+                let k_seqlen_tiles: i32 = kv_len / BN;
+                let mut mask_start: i32 = k_seqlen_tiles;
+                let mut tc: i32 = ceil_div(kv_len, BN);
+                if CAUSAL == 1i32 {
+                    mask_start = (query_start + q_m_idx * BM) / BN;
+                    mask_start = min(mask_start, k_seqlen_tiles);
+                    tc = ceil_div(min(m_end, kv_len), BN);
+                }
+
+                let k_part: Partition<f16, { [1, BN, D] }> = k.partition(const_shape![1, BN, D]);
+                let v_part: Partition<f16, { [1, BN, D] }> = v.partition(const_shape![1, BN, D]);
+                let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+                    dims: &[1i32, 0i32],
+                };
+
+                if MASK_SPLIT == 1i32 && CAUSAL == 1i32 {
+                    for j in 0i32..mask_start {
+                        let k_tile: Tile<f16, { [1, BN, D] }> =
+                            k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> =
+                            v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
+                    }
+                    for j in mask_start..tc {
+                        let k_tile: Tile<f16, { [1, BN, D] }> =
+                            k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        let offs_n: Tile<i32, { [M_EFF, BN] }> =
+                            broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
+                        let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
+                        if EVEN_K == 0i32 {
+                            let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
+                            mask = mask & lt_res;
+                        }
                         let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
                         mask = mask & ge_res;
+                        let mask_true: Tile<f32, { [M_EFF, BN] }> =
+                            constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = qk + select(mask, mask_true, mask_false);
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> =
+                            v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
                     }
-                    let mask_true: Tile<f32, { [M_EFF, BN] }> =
-                        constant(0.0f32, const_shape![M_EFF, BN]);
-                    qk = qk + select(mask, mask_true, mask_false);
+                } else {
+                    for j in 0i32..tc {
+                        let k_tile: Tile<f16, { [1, BN, D] }> =
+                            k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
+                            let offs_n: Tile<i32, { [M_EFF, BN] }> =
+                                broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
+                            let mut mask: Tile<bool, { [M_EFF, BN] }> =
+                                constant(true, const_shape![M_EFF, BN]);
+                            if EVEN_K == 0i32 {
+                                let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
+                                mask = mask & lt_res;
+                            }
+                            if CAUSAL == 1i32 {
+                                let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
+                                mask = mask & ge_res;
+                            }
+                            let mask_true: Tile<f32, { [M_EFF, BN] }> =
+                                constant(0.0f32, const_shape![M_EFF, BN]);
+                            qk = qk + select(mask, mask_true, mask_false);
+                        }
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> =
+                            v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
+                    }
                 }
 
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+                let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
+                let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
+                let acc_norm: Tile<f32, { [M_EFF, D] }> =
+                    true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
+                let out_tile: Tile<f16, { [BM, GROUP, D] }> =
+                    convert_tile(acc_norm.reshape(const_shape![BM, GROUP, D]));
 
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> =
-                    v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
+                // SAFETY: mutable full-tensor view construction only; the store goes
+                // through the checked PartitionMut::store path.
+                let mut out_part: PartitionMut<f16, { [BM, GROUP, D] }> =
+                    unsafe { out.partition_full_mut(const_shape![BM, GROUP, D]) };
+                out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
             }
         }
-
-        let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
-        let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
-        let acc_norm: Tile<f32, { [M_EFF, D] }> =
-            true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
-        let out_tile: Tile<f16, { [BM, GROUP, D] }> =
-            convert_tile(acc_norm.reshape(const_shape![BM, GROUP, D]));
-
-        // SAFETY: mutable full-tensor view construction only; the store goes
-        // through the checked PartitionMut::store path.
-        let mut out_part: PartitionMut<f16, { [BM, GROUP, D] }> =
-            unsafe { out.partition_full_mut(const_shape![BM, GROUP, D]) };
-        out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
     }
 
     /// DIAGNOSTIC resurrection of the deleted raw LPT kernel, verbatim from
@@ -1598,286 +1600,288 @@ pub mod kernels {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_idx = pid.0;
         let total_tiles: i32 = num_q_blocks * num_head_groups;
-        if tile_idx >= total_tiles {
-            return;
-        }
+        // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+        // returns below the top level; the old lowering fell through).
+        if tile_idx < total_tiles {
 
-        let sched: (i32, i32, i32) = if SCHED == 1i32 {
-            {
-                // Plain q-block-major order: all head groups for a q block,
-                // then the next shorter q block.
-                let block: i32 = tile_idx / num_head_groups;
-                let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
-                (block, q_head_group_idx, 1i32)
-            }
-        } else {
-            if SCHED == 2i32 {
+            let sched: (i32, i32, i32) = if SCHED == 1i32 {
                 {
-                    // Head-group-major order: complete the LPT q-block walk
-                    // for one head group before moving to the next.
-                    let q_head_group_idx: i32 = tile_idx / num_q_blocks;
-                    let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                    // Plain q-block-major order: all head groups for a q block,
+                    // then the next shorter q block.
+                    let block: i32 = tile_idx / num_head_groups;
+                    let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
                     (block, q_head_group_idx, 1i32)
                 }
             } else {
-                {
-                    // Same swizzle mapping as TileGym's ragged prefill
-                    // launcher, specialized to one batch and q_head_group.
-                    let l2_major_blocks: i32 = swizzle * num_q_blocks;
-                    let bidhb: i32 = tile_idx / l2_major_blocks;
-                    let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
-                    let head_group_span: i32 = if bidhb < num_hb_quotient {
-                        swizzle
-                    } else {
-                        num_hb_remainder
-                    };
-                    let block: i32 = l2_mod / head_group_span;
-                    let bidhb_residual: i32 = l2_mod - block * head_group_span;
-                    let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
-                    let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
-                    (block, q_head_group_idx, reverse)
-                }
-            }
-        };
-        let block: i32 = sched.0;
-        let q_head_group_idx: i32 = sched.1;
-        if q_head_group_idx >= num_head_groups {
-            return;
-        }
-        let q_m_idx: i32 = if sched.2 == 1i32 {
-            num_q_blocks - 1i32 - block
-        } else {
-            block
-        };
-        let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
-
-        let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
-        let log2: f32 = tile_to_scalar(log(two));
-        let qk_scale_log2: f32 = qk_scale / log2;
-        let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
-        let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
-
-        let offs_m_base: i32 = query_start + q_m_idx * BM;
-        let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
-        let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
-        let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
-            iota_bm_col.broadcast(const_shape![BM, GROUP]);
-        let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
-        let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
-        let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
-        let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
-
-        let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-        let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
-            .reshape(const_shape![1, BN])
-            .broadcast(const_shape![M_EFF, BN]);
-        let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
-        let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
-            - constant(1.0e30f32, const_shape![M_EFF, BN]);
-
-        let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
-        let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
-        let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
-        let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
-
-        let q_part: Partition<f16, { [BM, GROUP, D] }> =
-            q_tv.partition_permuted(const_shape![BM, GROUP, D], const_array![0, 1, 2]);
-        let tq_raw: Tile<f16, { [BM, GROUP, D] }> = load_view_tko(
-            &q_part,
-            [q_m_idx, q_head_group_idx, 0i32],
-            ordering::Weak,
-            scope::TileBlock,
-            Some(LATENCY),
-            tma::Enabled,
-        );
-        let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
-
-        let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
-        let k_seqlen_tiles: i32 = kv_len / BN;
-        let mut mask_start: i32 = k_seqlen_tiles;
-        let mut tc: i32 = ceil_div(kv_len, BN);
-        if CAUSAL == 1i32 {
-            mask_start = (query_start + q_m_idx * BM) / BN;
-            mask_start = min(mask_start, k_seqlen_tiles);
-            tc = ceil_div(min(m_end, kv_len), BN);
-        }
-
-        let k_part: Partition<f16, { [1, BN, D] }> =
-            k_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
-        let v_part: Partition<f16, { [1, BN, D] }> =
-            v_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-
-        if MASK_SPLIT == 1i32 && CAUSAL == 1i32 {
-            for j in 0i32..mask_start {
-                let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                    &k_part,
-                    [kv_head_idx, j, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(LATENCY),
-                    tma::Enabled,
-                );
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
-
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                    &v_part,
-                    [kv_head_idx, j, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(LATENCY),
-                    tma::Enabled,
-                );
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
-            }
-            for j in mask_start..tc {
-                let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                    &k_part,
-                    [kv_head_idx, j, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(LATENCY),
-                    tma::Enabled,
-                );
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                let offs_n: Tile<i32, { [M_EFF, BN] }> =
-                    broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
-                let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
-                if EVEN_K == 0i32 {
-                    let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
-                    mask = mask & lt_res;
-                }
-                let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
-                mask = mask & ge_res;
-                let mask_true: Tile<f32, { [M_EFF, BN] }> =
-                    constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = qk + select(mask, mask_true, mask_false);
-
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
-
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                    &v_part,
-                    [kv_head_idx, j, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(LATENCY),
-                    tma::Enabled,
-                );
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
-            }
-        } else {
-            for j in 0i32..tc {
-                let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                    &k_part,
-                    [kv_head_idx, j, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(LATENCY),
-                    tma::Enabled,
-                );
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
-                    let offs_n: Tile<i32, { [M_EFF, BN] }> =
-                        broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
-                    let mut mask: Tile<bool, { [M_EFF, BN] }> =
-                        constant(true, const_shape![M_EFF, BN]);
-                    if EVEN_K == 0i32 {
-                        let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
-                        mask = mask & lt_res;
+                if SCHED == 2i32 {
+                    {
+                        // Head-group-major order: complete the LPT q-block walk
+                        // for one head group before moving to the next.
+                        let q_head_group_idx: i32 = tile_idx / num_q_blocks;
+                        let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                        (block, q_head_group_idx, 1i32)
                     }
-                    if CAUSAL == 1i32 {
+                } else {
+                    {
+                        // Same swizzle mapping as TileGym's ragged prefill
+                        // launcher, specialized to one batch and q_head_group.
+                        let l2_major_blocks: i32 = swizzle * num_q_blocks;
+                        let bidhb: i32 = tile_idx / l2_major_blocks;
+                        let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
+                        let head_group_span: i32 = if bidhb < num_hb_quotient {
+                            swizzle
+                        } else {
+                            num_hb_remainder
+                        };
+                        let block: i32 = l2_mod / head_group_span;
+                        let bidhb_residual: i32 = l2_mod - block * head_group_span;
+                        let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
+                        let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
+                        (block, q_head_group_idx, reverse)
+                    }
+                }
+            };
+            let block: i32 = sched.0;
+            let q_head_group_idx: i32 = sched.1;
+            // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+            // returns below the top level; the old lowering fell through).
+            if q_head_group_idx < num_head_groups {
+                let q_m_idx: i32 = if sched.2 == 1i32 {
+                    num_q_blocks - 1i32 - block
+                } else {
+                    block
+                };
+                let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
+
+                let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
+                let log2: f32 = tile_to_scalar(log(two));
+                let qk_scale_log2: f32 = qk_scale / log2;
+                let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
+                let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
+
+                let offs_m_base: i32 = query_start + q_m_idx * BM;
+                let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
+                let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
+                let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
+                    iota_bm_col.broadcast(const_shape![BM, GROUP]);
+                let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
+                let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
+                let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
+                let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
+
+                let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+                let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
+                    .reshape(const_shape![1, BN])
+                    .broadcast(const_shape![M_EFF, BN]);
+                let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
+                let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
+                    - constant(1.0e30f32, const_shape![M_EFF, BN]);
+
+                let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
+                let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
+                let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
+                let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
+
+                let q_part: Partition<f16, { [BM, GROUP, D] }> =
+                    q_tv.partition_permuted(const_shape![BM, GROUP, D], const_array![0, 1, 2]);
+                let tq_raw: Tile<f16, { [BM, GROUP, D] }> = load_view_tko(
+                    &q_part,
+                    [q_m_idx, q_head_group_idx, 0i32],
+                    ordering::Weak,
+                    scope::TileBlock,
+                    Some(LATENCY),
+                    tma::Enabled,
+                );
+                let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
+
+                let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
+                let k_seqlen_tiles: i32 = kv_len / BN;
+                let mut mask_start: i32 = k_seqlen_tiles;
+                let mut tc: i32 = ceil_div(kv_len, BN);
+                if CAUSAL == 1i32 {
+                    mask_start = (query_start + q_m_idx * BM) / BN;
+                    mask_start = min(mask_start, k_seqlen_tiles);
+                    tc = ceil_div(min(m_end, kv_len), BN);
+                }
+
+                let k_part: Partition<f16, { [1, BN, D] }> =
+                    k_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
+                let v_part: Partition<f16, { [1, BN, D] }> =
+                    v_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
+                let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+                    dims: &[1i32, 0i32],
+                };
+
+                if MASK_SPLIT == 1i32 && CAUSAL == 1i32 {
+                    for j in 0i32..mask_start {
+                        let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                            &k_part,
+                            [kv_head_idx, j, 0i32],
+                            ordering::Weak,
+                            scope::TileBlock,
+                            Some(LATENCY),
+                            tma::Enabled,
+                        );
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                            &v_part,
+                            [kv_head_idx, j, 0i32],
+                            ordering::Weak,
+                            scope::TileBlock,
+                            Some(LATENCY),
+                            tma::Enabled,
+                        );
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
+                    }
+                    for j in mask_start..tc {
+                        let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                            &k_part,
+                            [kv_head_idx, j, 0i32],
+                            ordering::Weak,
+                            scope::TileBlock,
+                            Some(LATENCY),
+                            tma::Enabled,
+                        );
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        let offs_n: Tile<i32, { [M_EFF, BN] }> =
+                            broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
+                        let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
+                        if EVEN_K == 0i32 {
+                            let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
+                            mask = mask & lt_res;
+                        }
                         let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
                         mask = mask & ge_res;
+                        let mask_true: Tile<f32, { [M_EFF, BN] }> =
+                            constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = qk + select(mask, mask_true, mask_false);
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                            &v_part,
+                            [kv_head_idx, j, 0i32],
+                            ordering::Weak,
+                            scope::TileBlock,
+                            Some(LATENCY),
+                            tma::Enabled,
+                        );
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
                     }
-                    let mask_true: Tile<f32, { [M_EFF, BN] }> =
-                        constant(0.0f32, const_shape![M_EFF, BN]);
-                    qk = qk + select(mask, mask_true, mask_false);
+                } else {
+                    for j in 0i32..tc {
+                        let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                            &k_part,
+                            [kv_head_idx, j, 0i32],
+                            ordering::Weak,
+                            scope::TileBlock,
+                            Some(LATENCY),
+                            tma::Enabled,
+                        );
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
+                            let offs_n: Tile<i32, { [M_EFF, BN] }> =
+                                broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
+                            let mut mask: Tile<bool, { [M_EFF, BN] }> =
+                                constant(true, const_shape![M_EFF, BN]);
+                            if EVEN_K == 0i32 {
+                                let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
+                                mask = mask & lt_res;
+                            }
+                            if CAUSAL == 1i32 {
+                                let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
+                                mask = mask & ge_res;
+                            }
+                            let mask_true: Tile<f32, { [M_EFF, BN] }> =
+                                constant(0.0f32, const_shape![M_EFF, BN]);
+                            qk = qk + select(mask, mask_true, mask_false);
+                        }
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                            &v_part,
+                            [kv_head_idx, j, 0i32],
+                            ordering::Weak,
+                            scope::TileBlock,
+                            Some(LATENCY),
+                            tma::Enabled,
+                        );
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
+                    }
                 }
 
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+                let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
+                let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
+                let acc_norm: Tile<f32, { [M_EFF, D] }> =
+                    true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
+                let out_tile: Tile<f16, { [BM, GROUP, D] }> =
+                    convert_tile(acc_norm.reshape(const_shape![BM, GROUP, D]));
 
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                    &v_part,
-                    [kv_head_idx, j, 0i32],
-                    ordering::Weak,
-                    scope::TileBlock,
-                    Some(LATENCY),
-                    tma::Enabled,
-                );
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
+                let mut out_part: PartitionMut<f16, { [BM, GROUP, D] }> =
+                    unsafe { out_tv.partition_full_mut(const_shape![BM, GROUP, D]) };
+                unsafe {
+                    out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
+                }
             }
-        }
-
-        let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
-        let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
-        let acc_norm: Tile<f32, { [M_EFF, D] }> =
-            true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
-        let out_tile: Tile<f16, { [BM, GROUP, D] }> =
-            convert_tile(acc_norm.reshape(const_shape![BM, GROUP, D]));
-
-        let mut out_part: PartitionMut<f16, { [BM, GROUP, D] }> =
-            unsafe { out_tv.partition_full_mut(const_shape![BM, GROUP, D]) };
-        unsafe {
-            out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
         }
     }
 
@@ -1920,237 +1924,239 @@ pub mod kernels {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_idx = pid.0;
         let total_tiles: i32 = num_q_blocks * num_head_groups;
-        if tile_idx >= total_tiles {
-            return;
-        }
+        // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+        // returns below the top level; the old lowering fell through).
+        if tile_idx < total_tiles {
 
-        let sched: (i32, i32, i32) = if SCHED == 1i32 {
-            {
-                let block: i32 = tile_idx / num_head_groups;
-                let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
-                (block, q_head_group_idx, 1i32)
-            }
-        } else {
-            if SCHED == 2i32 {
+            let sched: (i32, i32, i32) = if SCHED == 1i32 {
                 {
-                    let q_head_group_idx: i32 = tile_idx / num_q_blocks;
-                    let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                    let block: i32 = tile_idx / num_head_groups;
+                    let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
                     (block, q_head_group_idx, 1i32)
                 }
             } else {
-                {
-                    let l2_major_blocks: i32 = swizzle * num_q_blocks;
-                    let bidhb: i32 = tile_idx / l2_major_blocks;
-                    let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
-                    let head_group_span: i32 = if bidhb < num_hb_quotient {
-                        swizzle
-                    } else {
-                        num_hb_remainder
-                    };
-                    let block: i32 = l2_mod / head_group_span;
-                    let bidhb_residual: i32 = l2_mod - block * head_group_span;
-                    let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
-                    let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
-                    (block, q_head_group_idx, reverse)
-                }
-            }
-        };
-        let block: i32 = sched.0;
-        let q_head_group_idx: i32 = sched.1;
-        if q_head_group_idx >= num_head_groups {
-            return;
-        }
-        let q_m_idx: i32 = if sched.2 == 1i32 {
-            num_q_blocks - 1i32 - block
-        } else {
-            block
-        };
-        let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
-
-        let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
-        let log2: f32 = tile_to_scalar(log(two));
-        let qk_scale_log2: f32 = qk_scale / log2;
-        let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
-        let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
-
-        let offs_m_base: i32 = query_start + q_m_idx * BM;
-        let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
-        let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
-        let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
-            iota_bm_col.broadcast(const_shape![BM, GROUP]);
-        let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
-        let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
-        let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
-        let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
-
-        let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-        let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
-            .reshape(const_shape![1, BN])
-            .broadcast(const_shape![M_EFF, BN]);
-        let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
-        let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
-            - constant(1.0e30f32, const_shape![M_EFF, BN]);
-
-        let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
-        let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
-        let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
-        let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
-
-        let q_part: Partition<f16, { [BM, GROUP, D] }> =
-            q.partition(const_shape![BM, GROUP, D]);
-        let tq_raw: Tile<f16, { [BM, GROUP, D] }> =
-            q_part.load_pipelined::<LATENCY>([q_m_idx, q_head_group_idx, 0i32]);
-        let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
-
-        let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
-        let k_seqlen_tiles: i32 = kv_len / BN;
-        let mut mask_start: i32 = k_seqlen_tiles;
-        let mut tc: i32 = ceil_div(kv_len, BN);
-        if CAUSAL == 1i32 {
-            mask_start = (query_start + q_m_idx * BM) / BN;
-            mask_start = min(mask_start, k_seqlen_tiles);
-            tc = ceil_div(min(m_end, kv_len), BN);
-        }
-
-        let k_part: Partition<f16, { [1, BN, D] }> = k.partition(const_shape![1, BN, D]);
-        let v_part: Partition<f16, { [1, BN, D] }> = v.partition(const_shape![1, BN, D]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-
-        if MASK_SPLIT == 1i32 && CAUSAL == 1i32 {
-            for j in 0i32..mask_start {
-                let k_tile: Tile<f16, { [1, BN, D] }> =
-                    k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
-
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> =
-                    v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
-            }
-            for j in mask_start..tc {
-                let k_tile: Tile<f16, { [1, BN, D] }> =
-                    k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                let offs_n: Tile<i32, { [M_EFF, BN] }> =
-                    broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
-                let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
-                if EVEN_K == 0i32 {
-                    let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
-                    mask = mask & lt_res;
-                }
-                let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
-                mask = mask & ge_res;
-                let mask_true: Tile<f32, { [M_EFF, BN] }> =
-                    constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = qk + select(mask, mask_true, mask_false);
-
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
-
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> =
-                    v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
-            }
-        } else {
-            for j in 0i32..tc {
-                let k_tile: Tile<f16, { [1, BN, D] }> =
-                    k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-                let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-                let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = mma(tq, k_trans, qk);
-
-                if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
-                    let offs_n: Tile<i32, { [M_EFF, BN] }> =
-                        broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
-                    let mut mask: Tile<bool, { [M_EFF, BN] }> =
-                        constant(true, const_shape![M_EFF, BN]);
-                    if EVEN_K == 0i32 {
-                        let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
-                        mask = mask & lt_res;
+                if SCHED == 2i32 {
+                    {
+                        let q_head_group_idx: i32 = tile_idx / num_q_blocks;
+                        let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                        (block, q_head_group_idx, 1i32)
                     }
-                    if CAUSAL == 1i32 {
+                } else {
+                    {
+                        let l2_major_blocks: i32 = swizzle * num_q_blocks;
+                        let bidhb: i32 = tile_idx / l2_major_blocks;
+                        let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
+                        let head_group_span: i32 = if bidhb < num_hb_quotient {
+                            swizzle
+                        } else {
+                            num_hb_remainder
+                        };
+                        let block: i32 = l2_mod / head_group_span;
+                        let bidhb_residual: i32 = l2_mod - block * head_group_span;
+                        let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
+                        let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
+                        (block, q_head_group_idx, reverse)
+                    }
+                }
+            };
+            let block: i32 = sched.0;
+            let q_head_group_idx: i32 = sched.1;
+            // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+            // returns below the top level; the old lowering fell through).
+            if q_head_group_idx < num_head_groups {
+                let q_m_idx: i32 = if sched.2 == 1i32 {
+                    num_q_blocks - 1i32 - block
+                } else {
+                    block
+                };
+                let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
+
+                let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
+                let log2: f32 = tile_to_scalar(log(two));
+                let qk_scale_log2: f32 = qk_scale / log2;
+                let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
+                let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
+
+                let offs_m_base: i32 = query_start + q_m_idx * BM;
+                let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
+                let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
+                let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
+                    iota_bm_col.broadcast(const_shape![BM, GROUP]);
+                let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
+                let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
+                let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
+                let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
+
+                let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+                let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
+                    .reshape(const_shape![1, BN])
+                    .broadcast(const_shape![M_EFF, BN]);
+                let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
+                let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
+                    - constant(1.0e30f32, const_shape![M_EFF, BN]);
+
+                let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
+                let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
+                let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
+                let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
+
+                let q_part: Partition<f16, { [BM, GROUP, D] }> =
+                    q.partition(const_shape![BM, GROUP, D]);
+                let tq_raw: Tile<f16, { [BM, GROUP, D] }> =
+                    q_part.load_pipelined::<LATENCY>([q_m_idx, q_head_group_idx, 0i32]);
+                let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
+
+                let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
+                let k_seqlen_tiles: i32 = kv_len / BN;
+                let mut mask_start: i32 = k_seqlen_tiles;
+                let mut tc: i32 = ceil_div(kv_len, BN);
+                if CAUSAL == 1i32 {
+                    mask_start = (query_start + q_m_idx * BM) / BN;
+                    mask_start = min(mask_start, k_seqlen_tiles);
+                    tc = ceil_div(min(m_end, kv_len), BN);
+                }
+
+                let k_part: Partition<f16, { [1, BN, D] }> = k.partition(const_shape![1, BN, D]);
+                let v_part: Partition<f16, { [1, BN, D] }> = v.partition(const_shape![1, BN, D]);
+                let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+                    dims: &[1i32, 0i32],
+                };
+
+                if MASK_SPLIT == 1i32 && CAUSAL == 1i32 {
+                    for j in 0i32..mask_start {
+                        let k_tile: Tile<f16, { [1, BN, D] }> =
+                            k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> =
+                            v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
+                    }
+                    for j in mask_start..tc {
+                        let k_tile: Tile<f16, { [1, BN, D] }> =
+                            k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        let offs_n: Tile<i32, { [M_EFF, BN] }> =
+                            broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
+                        let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
+                        if EVEN_K == 0i32 {
+                            let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
+                            mask = mask & lt_res;
+                        }
                         let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
                         mask = mask & ge_res;
+                        let mask_true: Tile<f32, { [M_EFF, BN] }> =
+                            constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = qk + select(mask, mask_true, mask_false);
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> =
+                            v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
                     }
-                    let mask_true: Tile<f32, { [M_EFF, BN] }> =
-                        constant(0.0f32, const_shape![M_EFF, BN]);
-                    qk = qk + select(mask, mask_true, mask_false);
+                } else {
+                    for j in 0i32..tc {
+                        let k_tile: Tile<f16, { [1, BN, D] }> =
+                            k_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                        let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                        let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = mma(tq, k_trans, qk);
+
+                        if (CAUSAL == 1i32 || EVEN_K == 0i32) && j >= mask_start {
+                            let offs_n: Tile<i32, { [M_EFF, BN] }> =
+                                broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
+                            let mut mask: Tile<bool, { [M_EFF, BN] }> =
+                                constant(true, const_shape![M_EFF, BN]);
+                            if EVEN_K == 0i32 {
+                                let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
+                                mask = mask & lt_res;
+                            }
+                            if CAUSAL == 1i32 {
+                                let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
+                                mask = mask & ge_res;
+                            }
+                            let mask_true: Tile<f32, { [M_EFF, BN] }> =
+                                constant(0.0f32, const_shape![M_EFF, BN]);
+                            qk = qk + select(mask, mask_true, mask_false);
+                        }
+
+                        let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                        let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                        let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                        let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                        let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                        let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                        let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                        let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                        let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                        l_i = l_i * alpha + l_ij;
+                        acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                        let v_tile: Tile<f16, { [1, BN, D] }> =
+                            v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
+                        let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                        let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                        acc = mma(p_f16, v_tile, acc);
+                        m_i = m_ij;
+                    }
                 }
 
-                let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-                let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-                let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-                let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-                let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-                let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+                let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
+                let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
+                let acc_norm: Tile<f32, { [M_EFF, D] }> =
+                    true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
+                let out_tile: Tile<f16, { [BM, GROUP, D] }> =
+                    convert_tile(acc_norm.reshape(const_shape![BM, GROUP, D]));
 
-                let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-                let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-                let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-                l_i = l_i * alpha + l_ij;
-                acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-                let v_tile: Tile<f16, { [1, BN, D] }> =
-                    v_part.load_pipelined::<LATENCY>([kv_head_idx, j, 0i32]);
-                let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-                let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-                acc = mma(p_f16, v_tile, acc);
-                m_i = m_ij;
+                // SAFETY: mutable full-tensor view construction only; the store goes
+                // through the checked PartitionMut::store path.
+                let mut out_part: PartitionMut<f16, { [BM, GROUP, D] }> =
+                    unsafe { out.partition_full_mut(const_shape![BM, GROUP, D]) };
+                out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
             }
         }
-
-        let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
-        let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
-        let acc_norm: Tile<f32, { [M_EFF, D] }> =
-            true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
-        let out_tile: Tile<f16, { [BM, GROUP, D] }> =
-            convert_tile(acc_norm.reshape(const_shape![BM, GROUP, D]));
-
-        // SAFETY: mutable full-tensor view construction only; the store goes
-        // through the checked PartitionMut::store path.
-        let mut out_part: PartitionMut<f16, { [BM, GROUP, D] }> =
-            unsafe { out.partition_full_mut(const_shape![BM, GROUP, D]) };
-        out_part.store(out_tile, [q_m_idx, q_head_group_idx, 0i32]);
     }
 
     // Split-K prefill variant for the raw-pointer GQA LPT path. This writes
@@ -2248,188 +2254,190 @@ pub mod kernels {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_idx = pid.0;
         let split_id = pid.1;
-        if tile_idx >= total_tiles {
-            return;
-        }
+        // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+        // returns below the top level; the old lowering fell through).
+        if tile_idx < total_tiles {
 
-        let sched: (i32, i32, i32) = if SCHED == 1i32 {
-            {
-                let block: i32 = tile_idx / num_head_groups;
-                let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
-                (block, q_head_group_idx, 1i32)
-            }
-        } else {
-            if SCHED == 2i32 {
+            let sched: (i32, i32, i32) = if SCHED == 1i32 {
                 {
-                    let q_head_group_idx: i32 = tile_idx / num_q_blocks;
-                    let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                    let block: i32 = tile_idx / num_head_groups;
+                    let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
                     (block, q_head_group_idx, 1i32)
                 }
             } else {
-                {
-                    let l2_major_blocks: i32 = swizzle * num_q_blocks;
-                    let bidhb: i32 = tile_idx / l2_major_blocks;
-                    let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
-                    let head_group_span: i32 = if bidhb < num_hb_quotient {
-                        swizzle
-                    } else {
-                        num_hb_remainder
-                    };
-                    let block: i32 = l2_mod / head_group_span;
-                    let bidhb_residual: i32 = l2_mod - block * head_group_span;
-                    let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
-                    let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
-                    (block, q_head_group_idx, reverse)
+                if SCHED == 2i32 {
+                    {
+                        let q_head_group_idx: i32 = tile_idx / num_q_blocks;
+                        let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                        (block, q_head_group_idx, 1i32)
+                    }
+                } else {
+                    {
+                        let l2_major_blocks: i32 = swizzle * num_q_blocks;
+                        let bidhb: i32 = tile_idx / l2_major_blocks;
+                        let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
+                        let head_group_span: i32 = if bidhb < num_hb_quotient {
+                            swizzle
+                        } else {
+                            num_hb_remainder
+                        };
+                        let block: i32 = l2_mod / head_group_span;
+                        let bidhb_residual: i32 = l2_mod - block * head_group_span;
+                        let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
+                        let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
+                        (block, q_head_group_idx, reverse)
+                    }
+                }
+            };
+            let block: i32 = sched.0;
+            let q_head_group_idx: i32 = sched.1;
+            // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+            // returns below the top level; the old lowering fell through).
+            if q_head_group_idx < num_head_groups {
+                let q_m_idx: i32 = if sched.2 == 1i32 {
+                    num_q_blocks - 1i32 - block
+                } else {
+                    block
+                };
+                let logical_tile_idx: i32 = q_m_idx * num_head_groups + q_head_group_idx;
+                let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
+
+                let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
+                let log2_v: f32 = tile_to_scalar(log(two));
+                let qk_scale_log2: f32 = qk_scale / log2_v;
+                let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
+                let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
+                    qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
+
+                let offs_m_base: i32 = query_start + q_m_idx * BM;
+                let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
+                let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
+                let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
+                    iota_bm_col.broadcast(const_shape![BM, GROUP]);
+                let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
+                let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
+                let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
+                let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
+                let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+                let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
+                    .reshape(const_shape![1, BN])
+                    .broadcast(const_shape![M_EFF, BN]);
+                let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
+                let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
+                    - constant(1.0e30f32, const_shape![M_EFF, BN]);
+
+                let q_part: Partition<f16, { [BM, GROUP, D] }> =
+                    q_tv.partition_permuted(const_shape![BM, GROUP, D], const_array![0, 1, 2]);
+                let tq_raw: Tile<f16, { [BM, GROUP, D] }> = load_view_tko(
+                    &q_part,
+                    [q_m_idx, q_head_group_idx, 0i32],
+                    ordering::Weak,
+                    scope::TileBlock,
+                    Some(LATENCY),
+                    tma::Enabled,
+                );
+                let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
+
+                let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
+                let k_seqlen_tiles: i32 = kv_len / BN;
+                let mut mask_start: i32 = (query_start + q_m_idx * BM) / BN;
+                mask_start = min(mask_start, k_seqlen_tiles);
+                let tc: i32 = ceil_div(min(m_end, kv_len), BN);
+                let tiles_per_split: i32 = ceil_div(tc, NUM_KV_SPLITS);
+                let start_tile: i32 = split_id * tiles_per_split;
+                let mut end_tile: i32 = start_tile + tiles_per_split;
+                end_tile = min(end_tile, tc);
+
+                let k_part: Partition<f16, { [1, BN, D] }> =
+                    k_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
+                let v_part: Partition<f16, { [1, BN, D] }> =
+                    v_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
+                let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+                    dims: &[1i32, 0i32],
+                };
+
+                let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
+                let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
+                let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
+                let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
+
+                for j in start_tile..end_tile {
+                    let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                        &k_part,
+                        [kv_head_idx, j, 0i32],
+                        ordering::Weak,
+                        scope::TileBlock,
+                        Some(LATENCY),
+                        tma::Enabled,
+                    );
+                    let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
+                    let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
+                    let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
+                    qk = mma(tq, k_trans, qk);
+
+                    if j >= mask_start {
+                        let offs_n: Tile<i32, { [M_EFF, BN] }> =
+                            broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
+                        let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
+                        if EVEN_K == 0i32 {
+                            let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
+                            mask = mask & lt_res;
+                        }
+                        let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
+                        mask = mask & ge_res;
+                        let mask_true: Tile<f32, { [M_EFF, BN] }> =
+                            constant(0.0f32, const_shape![M_EFF, BN]);
+                        qk = qk + select(mask, mask_true, mask_false);
+                    }
+
+                    let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
+                    let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
+                    let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
+                    let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
+                    let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
+                    let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
+
+                    let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
+                    let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
+                    let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
+                    l_i = l_i * alpha + l_ij;
+                    acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
+
+                    let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
+                        &v_part,
+                        [kv_head_idx, j, 0i32],
+                        ordering::Weak,
+                        scope::TileBlock,
+                        Some(LATENCY),
+                        tma::Enabled,
+                    );
+                    let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
+                    let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
+                    acc = mma(p_f16, v_tile, acc);
+                    m_i = m_ij;
+                }
+
+                let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
+                let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
+                let acc_norm: Tile<f32, { [M_EFF, D] }> =
+                    true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
+                let att_tile: Tile<f16, { [1, M_EFF, D] }> =
+                    convert_tile(acc_norm.reshape(const_shape![1, M_EFF, D]));
+                let mut att_part: PartitionMut<f16, { [1, M_EFF, D] }> =
+                    unsafe { att_tv.partition_full_mut(const_shape![1, M_EFF, D]) };
+                unsafe {
+                    att_part.store(att_tile, [logical_tile_idx, split_id, 0i32]);
+                }
+
+                let lse_col: Tile<f32, { [M_EFF, 1] }> = m_i + log2(l_safe);
+                let lse_tile: Tile<f32, { [1, M_EFF] }> = lse_col.reshape(const_shape![1, M_EFF]);
+                let mut lse_part: PartitionMut<f32, { [1, M_EFF] }> =
+                    unsafe { lse_tv.partition_full_mut(const_shape![1, M_EFF]) };
+                unsafe {
+                    lse_part.store(lse_tile, [logical_tile_idx, split_id]);
                 }
             }
-        };
-        let block: i32 = sched.0;
-        let q_head_group_idx: i32 = sched.1;
-        if q_head_group_idx >= num_head_groups {
-            return;
-        }
-        let q_m_idx: i32 = if sched.2 == 1i32 {
-            num_q_blocks - 1i32 - block
-        } else {
-            block
-        };
-        let logical_tile_idx: i32 = q_m_idx * num_head_groups + q_head_group_idx;
-        let kv_head_idx: i32 = q_head_group_idx * GROUP / query_group_size;
-
-        let two: Tile<f32, { [] }> = constant(2.0f32, const_shape![]);
-        let log2_v: f32 = tile_to_scalar(log(two));
-        let qk_scale_log2: f32 = qk_scale / log2_v;
-        let qk_scale_tile: Tile<f32, { [M_EFF, BN] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, BN]);
-        let qk_scale_col: Tile<f32, { [M_EFF, 1] }> =
-            qk_scale_log2.broadcast(const_shape![M_EFF, 1]);
-
-        let offs_m_base: i32 = query_start + q_m_idx * BM;
-        let iota_bm: Tile<i32, { [BM] }> = iota(const_shape![BM]);
-        let iota_bm_col: Tile<i32, { [BM, 1] }> = iota_bm.reshape(const_shape![BM, 1]);
-        let iota_bm_grp: Tile<i32, { [BM, GROUP] }> =
-            iota_bm_col.broadcast(const_shape![BM, GROUP]);
-        let base_bg: Tile<i32, { [BM, GROUP] }> = offs_m_base.broadcast(const_shape![BM, GROUP]);
-        let offs_m_bg: Tile<i32, { [BM, GROUP] }> = base_bg + iota_bm_grp;
-        let offs_m_col: Tile<i32, { [M_EFF, 1] }> = offs_m_bg.reshape(const_shape![M_EFF, 1]);
-        let offs_m: Tile<i32, { [M_EFF, BN] }> = offs_m_col.broadcast(const_shape![M_EFF, BN]);
-        let offs_n_tile: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-        let offs_n_tile: Tile<i32, { [M_EFF, BN] }> = offs_n_tile
-            .reshape(const_shape![1, BN])
-            .broadcast(const_shape![M_EFF, BN]);
-        let kv_len_tile: Tile<i32, { [M_EFF, BN] }> = kv_len.broadcast(const_shape![M_EFF, BN]);
-        let mask_false: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN])
-            - constant(1.0e30f32, const_shape![M_EFF, BN]);
-
-        let q_part: Partition<f16, { [BM, GROUP, D] }> =
-            q_tv.partition_permuted(const_shape![BM, GROUP, D], const_array![0, 1, 2]);
-        let tq_raw: Tile<f16, { [BM, GROUP, D] }> = load_view_tko(
-            &q_part,
-            [q_m_idx, q_head_group_idx, 0i32],
-            ordering::Weak,
-            scope::TileBlock,
-            Some(LATENCY),
-            tma::Enabled,
-        );
-        let tq: Tile<f16, { [M_EFF, D] }> = tq_raw.reshape(const_shape![M_EFF, D]);
-
-        let m_end: i32 = query_start + (q_m_idx + 1i32) * BM;
-        let k_seqlen_tiles: i32 = kv_len / BN;
-        let mut mask_start: i32 = (query_start + q_m_idx * BM) / BN;
-        mask_start = min(mask_start, k_seqlen_tiles);
-        let tc: i32 = ceil_div(min(m_end, kv_len), BN);
-        let tiles_per_split: i32 = ceil_div(tc, NUM_KV_SPLITS);
-        let start_tile: i32 = split_id * tiles_per_split;
-        let mut end_tile: i32 = start_tile + tiles_per_split;
-        end_tile = min(end_tile, tc);
-
-        let k_part: Partition<f16, { [1, BN, D] }> =
-            k_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
-        let v_part: Partition<f16, { [1, BN, D] }> =
-            v_tv.partition_permuted(const_shape![1, BN, D], const_array![0, 1, 2]);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-
-        let max_mag: Tile<f32, { [M_EFF, 1] }> = constant(1.0e30f32, const_shape![M_EFF, 1]);
-        let mut m_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]) - max_mag;
-        let mut l_i: Tile<f32, { [M_EFF, 1] }> = constant(0.0f32, const_shape![M_EFF, 1]);
-        let mut acc: Tile<f32, { [M_EFF, D] }> = constant(0.0f32, const_shape![M_EFF, D]);
-
-        for j in start_tile..end_tile {
-            let k_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                &k_part,
-                [kv_head_idx, j, 0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(LATENCY),
-                tma::Enabled,
-            );
-            let k_tile: Tile<f16, { [BN, D] }> = k_tile.reshape(const_shape![BN, D]);
-            let k_trans: Tile<f16, { [D, BN] }> = permute(k_tile, transpose);
-            let mut qk: Tile<f32, { [M_EFF, BN] }> = constant(0.0f32, const_shape![M_EFF, BN]);
-            qk = mma(tq, k_trans, qk);
-
-            if j >= mask_start {
-                let offs_n: Tile<i32, { [M_EFF, BN] }> =
-                    broadcast_scalar(j * BN, const_shape![M_EFF, BN]) + offs_n_tile;
-                let mut mask: Tile<bool, { [M_EFF, BN] }> = constant(true, const_shape![M_EFF, BN]);
-                if EVEN_K == 0i32 {
-                    let lt_res: Tile<bool, { [M_EFF, BN] }> = lt_tile(offs_n, kv_len_tile);
-                    mask = mask & lt_res;
-                }
-                let ge_res: Tile<bool, { [M_EFF, BN] }> = ge_tile(offs_m, offs_n);
-                mask = mask & ge_res;
-                let mask_true: Tile<f32, { [M_EFF, BN] }> =
-                    constant(0.0f32, const_shape![M_EFF, BN]);
-                qk = qk + select(mask, mask_true, mask_false);
-            }
-
-            let qk_max: Tile<f32, { [M_EFF] }> = reduce_max(qk, 1i32);
-            let qk_max_col: Tile<f32, { [M_EFF, 1] }> = qk_max.reshape(const_shape![M_EFF, 1]);
-            let qk_max_scaled: Tile<f32, { [M_EFF, 1] }> = qk_max_col * qk_scale_col;
-            let m_ij: Tile<f32, { [M_EFF, 1] }> = max_tile(m_i, qk_max_scaled);
-            let qk = qk * qk_scale_tile - m_ij.broadcast(const_shape![M_EFF, BN]);
-            let p: Tile<f32, { [M_EFF, BN] }> = exp2(qk, ftz::Disabled);
-
-            let l_ij: Tile<f32, { [M_EFF] }> = reduce_sum(p, 1i32);
-            let l_ij: Tile<f32, { [M_EFF, 1] }> = l_ij.reshape(const_shape![M_EFF, 1]);
-            let alpha: Tile<f32, { [M_EFF, 1] }> = exp2(m_i - m_ij, ftz::Disabled);
-            l_i = l_i * alpha + l_ij;
-            acc = acc * alpha.broadcast(const_shape![M_EFF, D]);
-
-            let v_tile: Tile<f16, { [1, BN, D] }> = load_view_tko(
-                &v_part,
-                [kv_head_idx, j, 0i32],
-                ordering::Weak,
-                scope::TileBlock,
-                Some(LATENCY),
-                tma::Enabled,
-            );
-            let p_f16: Tile<f16, { [M_EFF, BN] }> = convert_tile(p);
-            let v_tile: Tile<f16, { [BN, D] }> = v_tile.reshape(const_shape![BN, D]);
-            acc = mma(p_f16, v_tile, acc);
-            m_i = m_ij;
-        }
-
-        let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
-        let l_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(l_i, eps);
-        let acc_norm: Tile<f32, { [M_EFF, D] }> =
-            true_div(acc, l_safe.broadcast(const_shape![M_EFF, D]));
-        let att_tile: Tile<f16, { [1, M_EFF, D] }> =
-            convert_tile(acc_norm.reshape(const_shape![1, M_EFF, D]));
-        let mut att_part: PartitionMut<f16, { [1, M_EFF, D] }> =
-            unsafe { att_tv.partition_full_mut(const_shape![1, M_EFF, D]) };
-        unsafe {
-            att_part.store(att_tile, [logical_tile_idx, split_id, 0i32]);
-        }
-
-        let lse_col: Tile<f32, { [M_EFF, 1] }> = m_i + log2(l_safe);
-        let lse_tile: Tile<f32, { [1, M_EFF] }> = lse_col.reshape(const_shape![1, M_EFF]);
-        let mut lse_part: PartitionMut<f32, { [1, M_EFF] }> =
-            unsafe { lse_tv.partition_full_mut(const_shape![1, M_EFF]) };
-        unsafe {
-            lse_part.store(lse_tile, [logical_tile_idx, split_id]);
         }
     }
 
@@ -2505,112 +2513,114 @@ pub mod kernels {
         let pid: (i32, i32, i32) = get_tile_block_id();
         let tile_idx = pid.0;
         let d_chunk_id = pid.1;
-        if tile_idx >= total_tiles {
-            return;
-        }
+        // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+        // returns below the top level; the old lowering fell through).
+        if tile_idx < total_tiles {
 
-        let sched: (i32, i32, i32) = if SCHED == 1i32 {
-            {
-                let block: i32 = tile_idx / num_head_groups;
-                let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
-                (block, q_head_group_idx, 1i32)
-            }
-        } else {
-            if SCHED == 2i32 {
+            let sched: (i32, i32, i32) = if SCHED == 1i32 {
                 {
-                    let q_head_group_idx: i32 = tile_idx / num_q_blocks;
-                    let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                    let block: i32 = tile_idx / num_head_groups;
+                    let q_head_group_idx: i32 = tile_idx - block * num_head_groups;
                     (block, q_head_group_idx, 1i32)
                 }
             } else {
-                {
-                    let l2_major_blocks: i32 = swizzle * num_q_blocks;
-                    let bidhb: i32 = tile_idx / l2_major_blocks;
-                    let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
-                    let head_group_span: i32 = if bidhb < num_hb_quotient {
-                        swizzle
-                    } else {
-                        num_hb_remainder
-                    };
-                    let block: i32 = l2_mod / head_group_span;
-                    let bidhb_residual: i32 = l2_mod - block * head_group_span;
-                    let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
-                    let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
-                    (block, q_head_group_idx, reverse)
+                if SCHED == 2i32 {
+                    {
+                        let q_head_group_idx: i32 = tile_idx / num_q_blocks;
+                        let block: i32 = tile_idx - q_head_group_idx * num_q_blocks;
+                        (block, q_head_group_idx, 1i32)
+                    }
+                } else {
+                    {
+                        let l2_major_blocks: i32 = swizzle * num_q_blocks;
+                        let bidhb: i32 = tile_idx / l2_major_blocks;
+                        let l2_mod: i32 = tile_idx - bidhb * l2_major_blocks;
+                        let head_group_span: i32 = if bidhb < num_hb_quotient {
+                            swizzle
+                        } else {
+                            num_hb_remainder
+                        };
+                        let block: i32 = l2_mod / head_group_span;
+                        let bidhb_residual: i32 = l2_mod - block * head_group_span;
+                        let q_head_group_idx: i32 = bidhb * swizzle + bidhb_residual;
+                        let reverse: i32 = if SCHED == 3i32 { 0i32 } else { 1i32 };
+                        (block, q_head_group_idx, reverse)
+                    }
+                }
+            };
+            let block: i32 = sched.0;
+            let q_head_group_idx: i32 = sched.1;
+            // Guard rewritten from an early `return` (cutile-rs 0.3.1 rejects
+            // returns below the top level; the old lowering fell through).
+            if q_head_group_idx < num_head_groups {
+                let q_m_idx: i32 = if sched.2 == 1i32 {
+                    num_q_blocks - 1i32 - block
+                } else {
+                    block
+                };
+                let logical_tile_idx: i32 = q_m_idx * num_head_groups + q_head_group_idx;
+
+                let lse_part: Partition<f32, { [1, NS_M] }> =
+                    lse_tv.partition_permuted(const_shape![1, NS_M], const_array![0, 1]);
+                let lse_tile: Tile<f32, { [1, NS_M] }> = load_view_tko(
+                    &lse_part,
+                    [logical_tile_idx, 0i32],
+                    ordering::Weak,
+                    scope::TileBlock,
+                    Some(LATENCY),
+                    tma::Enabled,
+                );
+                let lse_ns_m: Tile<f32, { [NUM_KV_SPLITS, M_EFF] }> =
+                    lse_tile.reshape(const_shape![NUM_KV_SPLITS, M_EFF]);
+                let transpose_2d: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
+                    dims: &[1i32, 0i32],
+                };
+                let lse_tile: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> = permute(lse_ns_m, transpose_2d);
+                let lse_max: Tile<f32, { [M_EFF] }> = reduce_max(lse_tile, 1i32);
+                let lse_max_col: Tile<f32, { [M_EFF, 1] }> = lse_max.reshape(const_shape![M_EFF, 1]);
+                let lse_shifted: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> =
+                    lse_tile - lse_max_col.broadcast(const_shape![M_EFF, NUM_KV_SPLITS]);
+                let scale_raw: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> = exp2(lse_shifted, ftz::Disabled);
+                let scale_sum: Tile<f32, { [M_EFF] }> = reduce_sum(scale_raw, 1i32);
+                let scale_sum_col: Tile<f32, { [M_EFF, 1] }> = scale_sum.reshape(const_shape![M_EFF, 1]);
+                let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
+                let scale_sum_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(scale_sum_col, eps);
+                let weights: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> = true_div(
+                    scale_raw,
+                    scale_sum_safe.broadcast(const_shape![M_EFF, NUM_KV_SPLITS]),
+                );
+
+                let att_part: Partition<f16, { [1, NS_M, CHUNK_D] }> =
+                    att_tv.partition_permuted(const_shape![1, NS_M, CHUNK_D], const_array![0, 1, 2]);
+                let att_tile: Tile<f16, { [1, NS_M, CHUNK_D] }> = load_view_tko(
+                    &att_part,
+                    [logical_tile_idx, 0i32, d_chunk_id],
+                    ordering::Weak,
+                    scope::TileBlock,
+                    Some(LATENCY),
+                    tma::Enabled,
+                );
+                let att_ns_m_d: Tile<f16, { [NUM_KV_SPLITS, M_EFF, CHUNK_D] }> =
+                    att_tile.reshape(const_shape![NUM_KV_SPLITS, M_EFF, CHUNK_D]);
+                let transpose_3d_01: Array<{ [1, 0, 2] }> = Array::<{ [1, 0, 2] }> {
+                    dims: &[1i32, 0i32, 2i32],
+                };
+                let att_m_ns_d: Tile<f16, { [M_EFF, NUM_KV_SPLITS, CHUNK_D] }> =
+                    permute(att_ns_m_d, transpose_3d_01);
+                let att_tile: Tile<f32, { [M_EFF, NUM_KV_SPLITS, CHUNK_D] }> = convert_tile(att_m_ns_d);
+                let w_3d: Tile<f32, { [M_EFF, NUM_KV_SPLITS, 1] }> =
+                    weights.reshape(const_shape![M_EFF, NUM_KV_SPLITS, 1]);
+                let weighted: Tile<f32, { [M_EFF, NUM_KV_SPLITS, CHUNK_D] }> =
+                    att_tile * w_3d.broadcast(const_shape![M_EFF, NUM_KV_SPLITS, CHUNK_D]);
+                let out_tile: Tile<f32, { [M_EFF, CHUNK_D] }> = reduce_sum(weighted, 1i32);
+                let out_f16: Tile<f16, { [BM, GROUP, CHUNK_D] }> =
+                    convert_tile(out_tile.reshape(const_shape![BM, GROUP, CHUNK_D]));
+                let mut out_part: PartitionMut<f16, { [BM, GROUP, CHUNK_D] }> =
+                    unsafe { out_tv.partition_full_mut(const_shape![BM, GROUP, CHUNK_D]) };
+                unsafe {
+                    out_part.store(out_f16, [q_m_idx, q_head_group_idx, d_chunk_id]);
                 }
             }
-        };
-        let block: i32 = sched.0;
-        let q_head_group_idx: i32 = sched.1;
-        if q_head_group_idx >= num_head_groups {
-            return;
-        }
-        let q_m_idx: i32 = if sched.2 == 1i32 {
-            num_q_blocks - 1i32 - block
-        } else {
-            block
-        };
-        let logical_tile_idx: i32 = q_m_idx * num_head_groups + q_head_group_idx;
-
-        let lse_part: Partition<f32, { [1, NS_M] }> =
-            lse_tv.partition_permuted(const_shape![1, NS_M], const_array![0, 1]);
-        let lse_tile: Tile<f32, { [1, NS_M] }> = load_view_tko(
-            &lse_part,
-            [logical_tile_idx, 0i32],
-            ordering::Weak,
-            scope::TileBlock,
-            Some(LATENCY),
-            tma::Enabled,
-        );
-        let lse_ns_m: Tile<f32, { [NUM_KV_SPLITS, M_EFF] }> =
-            lse_tile.reshape(const_shape![NUM_KV_SPLITS, M_EFF]);
-        let transpose_2d: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-        let lse_tile: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> = permute(lse_ns_m, transpose_2d);
-        let lse_max: Tile<f32, { [M_EFF] }> = reduce_max(lse_tile, 1i32);
-        let lse_max_col: Tile<f32, { [M_EFF, 1] }> = lse_max.reshape(const_shape![M_EFF, 1]);
-        let lse_shifted: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> =
-            lse_tile - lse_max_col.broadcast(const_shape![M_EFF, NUM_KV_SPLITS]);
-        let scale_raw: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> = exp2(lse_shifted, ftz::Disabled);
-        let scale_sum: Tile<f32, { [M_EFF] }> = reduce_sum(scale_raw, 1i32);
-        let scale_sum_col: Tile<f32, { [M_EFF, 1] }> = scale_sum.reshape(const_shape![M_EFF, 1]);
-        let eps: Tile<f32, { [M_EFF, 1] }> = constant(1.0e-8f32, const_shape![M_EFF, 1]);
-        let scale_sum_safe: Tile<f32, { [M_EFF, 1] }> = max_tile(scale_sum_col, eps);
-        let weights: Tile<f32, { [M_EFF, NUM_KV_SPLITS] }> = true_div(
-            scale_raw,
-            scale_sum_safe.broadcast(const_shape![M_EFF, NUM_KV_SPLITS]),
-        );
-
-        let att_part: Partition<f16, { [1, NS_M, CHUNK_D] }> =
-            att_tv.partition_permuted(const_shape![1, NS_M, CHUNK_D], const_array![0, 1, 2]);
-        let att_tile: Tile<f16, { [1, NS_M, CHUNK_D] }> = load_view_tko(
-            &att_part,
-            [logical_tile_idx, 0i32, d_chunk_id],
-            ordering::Weak,
-            scope::TileBlock,
-            Some(LATENCY),
-            tma::Enabled,
-        );
-        let att_ns_m_d: Tile<f16, { [NUM_KV_SPLITS, M_EFF, CHUNK_D] }> =
-            att_tile.reshape(const_shape![NUM_KV_SPLITS, M_EFF, CHUNK_D]);
-        let transpose_3d_01: Array<{ [1, 0, 2] }> = Array::<{ [1, 0, 2] }> {
-            dims: &[1i32, 0i32, 2i32],
-        };
-        let att_m_ns_d: Tile<f16, { [M_EFF, NUM_KV_SPLITS, CHUNK_D] }> =
-            permute(att_ns_m_d, transpose_3d_01);
-        let att_tile: Tile<f32, { [M_EFF, NUM_KV_SPLITS, CHUNK_D] }> = convert_tile(att_m_ns_d);
-        let w_3d: Tile<f32, { [M_EFF, NUM_KV_SPLITS, 1] }> =
-            weights.reshape(const_shape![M_EFF, NUM_KV_SPLITS, 1]);
-        let weighted: Tile<f32, { [M_EFF, NUM_KV_SPLITS, CHUNK_D] }> =
-            att_tile * w_3d.broadcast(const_shape![M_EFF, NUM_KV_SPLITS, CHUNK_D]);
-        let out_tile: Tile<f32, { [M_EFF, CHUNK_D] }> = reduce_sum(weighted, 1i32);
-        let out_f16: Tile<f16, { [BM, GROUP, CHUNK_D] }> =
-            convert_tile(out_tile.reshape(const_shape![BM, GROUP, CHUNK_D]));
-        let mut out_part: PartitionMut<f16, { [BM, GROUP, CHUNK_D] }> =
-            unsafe { out_tv.partition_full_mut(const_shape![BM, GROUP, CHUNK_D]) };
-        unsafe {
-            out_part.store(out_f16, [q_m_idx, q_head_group_idx, d_chunk_id]);
         }
     }
 

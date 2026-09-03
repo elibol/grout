@@ -3,7 +3,7 @@
 //! The poster-example shape for multi-architecture tuning:
 //!
 //! - **Declared spaces** (`Config`) per tunable site, searched by the
-//!   library's resumable `GridSearch` through the public `Oracle` trait.
+//!   library's resumable `GridSearch` through the public `Objective` trait.
 //! - **Engine objective**: each trial times real `Qwen3Engine` steps (whole
 //!   prefill or decode window), not an isolated kernel — grout's tile optima
 //!   are only meaningful end-to-end (per-kernel-form tuning lesson).
@@ -28,30 +28,21 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use cutile::tune::{
-    best_config, space_hash, Config, GridSearch, Oracle, ParamValue, Record, RecordEntry,
+    best_config, space_hash, Config, GridSearch, Objective, ParamValue, Record, RecordEntry,
     Searcher, Trial, TrialState, Workspace,
 };
 
-/// `Trial`/`TrialState` are #[non_exhaustive], so an out-of-crate `Oracle`
-/// impl cannot construct its own return value; until upstream adds a
-/// constructor (reported), build trials through serde.
-fn make_trial(config_id: &str, state: serde_json::Value) -> Trial {
-    serde_json::from_value(serde_json::json!({
-        "config_id": config_id,
-        "state": state,
-    }))
-    .expect("Trial schema")
-}
-
+/// `Trial`/`TrialState` are #[non_exhaustive]; the public constructors
+/// (`Trial::measured` / `Trial::invalid`, landed with cutile-rs #239) are the
+/// out-of-crate `Objective` implementor's way to build a return value.
+/// `Trial::measured` records a non-finite timing as `Invalid` so it can
+/// round-trip through the JSONL log.
 fn invalid_trial(config_id: &str, reason: String) -> Trial {
-    make_trial(config_id, serde_json::json!({"Invalid": {"reason": reason}}))
+    Trial::invalid(config_id, reason)
 }
 
 fn measured_trial(config_id: &str, median_ms: f32, min_ms: f32, reps: usize) -> Trial {
-    make_trial(
-        config_id,
-        serde_json::json!({"Measured": {"median_ms": median_ms, "min_ms": min_ms, "reps": reps}}),
-    )
+    Trial::measured(config_id, median_ms, min_ms, reps)
 }
 use grout::model::Qwen3Engine;
 use std::fs;
@@ -285,7 +276,6 @@ fn apply_config(config: &Config) {
                 ParamValue::Int(0) => std::env::remove_var(key),
                 ParamValue::Int(v) => std::env::set_var(key, v.to_string()),
                 ParamValue::Str(s) => std::env::set_var(key, s),
-                other => panic!("unsupported param value {other:?}"),
             }
         }
     }
@@ -301,9 +291,10 @@ fn clear_config(config: &Config) {
 /// Engine-objective oracle: measures whole engine steps per candidate.
 ///
 /// This composes with the library's `GridSearch`/`Searcher` through the
-/// public `Oracle` trait; the closure-based `Autotuner` front-end assumes a
-/// CUDA-event-timed launch on one stream, which does not fit an engine step
-/// that spans streams and host logic (reported upstream).
+/// public `Objective` trait (named `Oracle` before cutile-rs #239); the
+/// closure-based `Autotuner` front-end assumes a CUDA-event-timed launch on
+/// one stream, which does not fit an engine step that spans streams and host
+/// logic (reported upstream).
 struct EngineOracle<'a> {
     configs: Vec<Config>,
     engine: Option<Qwen3Engine>,
@@ -407,7 +398,7 @@ impl EngineOracle<'_> {
     }
 }
 
-impl Oracle for EngineOracle<'_> {
+impl Objective for EngineOracle<'_> {
     fn configs(&self) -> &[Config] {
         &self.configs
     }

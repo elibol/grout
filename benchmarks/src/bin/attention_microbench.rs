@@ -304,7 +304,11 @@ fn alloc_split_scratch(
 
 fn alloc_buffers(stream: &Arc<Stream>, args: &Args, mode: &str) -> Result<Buffers> {
     let (att_partial, lse_partial) = alloc_split_scratch(stream, args, mode)?;
-    if args.check {
+    // The deterministic input pattern is required by --check AND by
+    // --output-hash: over zero-filled Q/K/V every attention kernel writes an
+    // all-zero output, so a hash of it compares nothing (found the hard way —
+    // the hash matched the FNV-1a of an all-zero buffer).
+    if args.check || args.output_hash {
         let q_len = args.q_len * args.q_heads * args.head_dim;
         let k_len = args.kv_heads * args.q_len * args.head_dim;
         let v_len = k_len;

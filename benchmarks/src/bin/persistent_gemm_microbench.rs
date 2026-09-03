@@ -9,6 +9,7 @@ use cutile::tensor::Tensor;
 use cutile::tile_kernel::TileKernel;
 use cutile::{api, core::f16};
 
+use grout::driver_compat::DriverCall;
 use grout::kernels::gemm_persistent_f16;
 
 #[path = "../../../src/cublas.rs"]
@@ -475,8 +476,10 @@ fn read_elements(
                 base + (*index * std::mem::size_of::<f16>()) as u64,
                 1,
                 stream,
-            );
+            )
         }
+        .driver_result()
+        .map_err(|e| anyhow!("sample D2H failed: {e:?}"))?;
     }
     unsafe { stream.synchronize() }
         .map_err(|e| anyhow!("sample D2H synchronization failed: {e:?}"))?;

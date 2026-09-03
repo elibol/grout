@@ -26,15 +26,19 @@ cuda-async = "0.3.0"
 cutile-compiler = "0.3.0"
 cutile = { version = "0.3.0", features = ["experimental-tune"] }
 
-# Rank-3 mapped partitions + shared index streams (iter_indices_with) for the
-# safe-kernel migration. Drop this section once the feature branch ships in a
-# crates.io release.
+# VALIDATION BRANCH: cutile-rs main @ 447e906cb24d08fe8ccf13ed8dc9874ddc5d7c76
+# (PR #258, the post-audit follow-up; workspace version still 0.3.0 so the
+# crates.io patch applies). Local checkout ../cutile-rs-agent is code-identical
+# to that rev (diff excluding .internal is empty). The git-dependency spelling
+# of the same pin is:
+#   { git = "https://github.com/NVlabs/cutile-rs", rev = "447e906cb24d08fe8ccf13ed8dc9874ddc5d7c76" }
+# Baseline (safe-kernels branch) points at the ../cutile-rs-v0.3.0 worktree.
 [patch.crates-io]
-cuda-bindings = { path = "../cutile-rs-v0.3.0/cuda-bindings" }
-cuda-core = { path = "../cutile-rs-v0.3.0/cuda-core" }
-cuda-async = { path = "../cutile-rs-v0.3.0/cuda-async" }
-cutile-compiler = { path = "../cutile-rs-v0.3.0/cutile-compiler" }
-cutile = { path = "../cutile-rs-v0.3.0/cutile" }
+cuda-bindings = { path = "../cutile-rs-agent/cuda-bindings" }
+cuda-core = { path = "../cutile-rs-agent/cuda-core" }
+cuda-async = { path = "../cutile-rs-agent/cuda-async" }
+cutile-compiler = { path = "../cutile-rs-agent/cutile-compiler" }
+cutile = { path = "../cutile-rs-agent/cutile" }
 
 [features]
 benchmarks = []

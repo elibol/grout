@@ -1,5 +1,6 @@
 use crate::config::{GenerationConfig, Qwen3Config};
 use crate::cublas;
+use crate::driver_compat::DriverCall;
 use crate::flash_decode::attention_decode_kernel_grouped;
 use crate::kernels::{
     KernelKind, TILE_KERNEL_KINDS, add_2d_f16, add_rms_norm_decode_bounded_f16,
@@ -509,8 +510,10 @@ impl DecodeCudaGraphRunner {
                 self.token_host.as_ptr(),
                 1,
                 self.graph.stream(),
-            );
+            )
         }
+        .driver_result()
+        .map_err(|e| anyhow::anyhow!("seed token H2D failed: {e:?}"))?;
         Ok(())
     }
 
@@ -532,17 +535,23 @@ impl DecodeCudaGraphRunner {
                 self.position_host.as_ptr(),
                 1,
                 self.graph.stream(),
-            );
-            // s_kv copy only needed when flash_decode graph is active
-            if env_bool_or("GROUT_FLASH_DECODE", false) {
-                self.s_kv_host[0] = (position_start + 1) as i32;
+            )
+        }
+        .driver_result()
+        .map_err(|e| anyhow::anyhow!("position H2D failed: {e:?}"))?;
+        // s_kv copy only needed when flash_decode graph is active
+        if env_bool_or("GROUT_FLASH_DECODE", false) {
+            self.s_kv_host[0] = (position_start + 1) as i32;
+            unsafe {
                 memcpy_htod_async(
                     self.s_kv_device.device_pointer().cu_deviceptr(),
                     self.s_kv_host.as_ptr(),
                     1,
                     self.graph.stream(),
-                );
+                )
             }
+            .driver_result()
+            .map_err(|e| anyhow::anyhow!("s_kv H2D failed: {e:?}"))?;
         }
         self.graph
             .launch()
@@ -554,8 +563,10 @@ impl DecodeCudaGraphRunner {
                 self.token_ids_device.device_pointer().cu_deviceptr(),
                 1,
                 self.graph.stream(),
-            );
+            )
         }
+        .driver_result()
+        .map_err(|e| anyhow::anyhow!("token D2H failed: {e:?}"))?;
         unsafe { self.graph.stream().synchronize() }
             .map_err(|e| anyhow::anyhow!("sync after token d2h failed: {e:?}"))?;
         Ok(self.token_host[0])
@@ -2957,8 +2968,10 @@ impl Qwen3Engine {
                                 &s_kv_val as *const i32,
                                 1,
                                 stream,
-                            );
+                            )
                         }
+                        .driver_result()
+                        .map_err(|e| anyhow::anyhow!("s_kv H2D failed: {e:?}"))?;
                         unsafe { stream.synchronize() }
                             .map_err(|e| anyhow::anyhow!("s_kv sync failed: {e:?}"))?;
 
@@ -5284,8 +5297,10 @@ impl Qwen3Engine {
                 src_ptr,
                 out_cols * elem_size,
                 ctx.get_cuda_stream(),
-            );
+            )
         }
+        .driver_result()
+        .map_err(|e| anyhow::anyhow!("SliceCols D2D failed: {e:?}"))?;
         Ok(out)
     }
 
@@ -6438,11 +6453,19 @@ fn concat_weight_rows_2d(
 
     // Allocate the merged tensor and copy each source into it.
     let ctx = cuda_async::device_operation::ExecutionContext::new(stream.clone());
-    let dst_ptr = unsafe { cuda_core::malloc_async(total_bytes, stream) };
+    let dst_ptr = unsafe { cuda_core::malloc_async(total_bytes, stream) }
+        .driver_result()
+        .map_err(|e| anyhow::anyhow!("malloc_async({total_bytes} B) failed: {e:?}"))?;
     let mut offset_bytes = 0u64;
     for (src_ptr, t_bytes) in &src_parts {
-        unsafe {
-            memcpy_dtod_async::<u8>(dst_ptr + offset_bytes, *src_ptr, *t_bytes, stream);
+        if let Err(e) =
+            unsafe { memcpy_dtod_async::<u8>(dst_ptr + offset_bytes, *src_ptr, *t_bytes, stream) }
+                .driver_result()
+        {
+            // Best-effort release of the partially filled buffer; the copy
+            // error is the one worth reporting.
+            let _ = unsafe { cuda_core::free_async(dst_ptr, stream) }.driver_result();
+            bail!("concat_weight_rows_2d D2D failed: {e:?}");
         }
         offset_bytes += *t_bytes as u64;
     }

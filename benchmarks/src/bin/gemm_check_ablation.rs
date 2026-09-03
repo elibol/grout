@@ -223,7 +223,17 @@ fn main() -> Result<()> {
                 reference.len()
             );
         }
-        eprintln!("n={n}: all arms bitwise-identical; timing...");
+        // FNV-1a over the (arm-identical) output bits: lets two builds of
+        // this harness — e.g. against two cutile-rs revisions — be compared
+        // bitwise across processes.
+        let mut h: u64 = 0xcbf29ce484222325;
+        for v in reference {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        eprintln!("n={n}: all arms bitwise-identical (output_hash={h:016x}); timing...");
 
         let mut z = api::zeros::<f16>(&[n, n])
             .sync_on(&stream)
