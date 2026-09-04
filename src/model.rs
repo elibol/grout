@@ -5984,7 +5984,10 @@ impl Qwen3Engine {
                 let use_trtllm = q_len > 1
                     && matches!(position_input, PositionInput::Host(_))
                     && crate::trtllm_attn::enabled();
-                let use_gqa = env_bool_or("GROUT_FMHA_PREFILL_GQA", false);
+                // Dispatch flag for the head-grouped GQA-mapped kernel; a
+                // tunable like the tile knobs (env > record > default) so a
+                // record can select that path.
+                let use_gqa = self.tuned_bool("GROUT_FMHA_PREFILL_GQA", q_len, false);
                 let use_prefill_kernel = env_bool_or("GROUT_FMHA_PREFILL", true);
                 if use_trtllm {
                     // trtllm-gen CUDA C++ backend (opt-in, sm_100): dense

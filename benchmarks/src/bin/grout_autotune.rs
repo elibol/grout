@@ -77,6 +77,14 @@ struct Args {
     /// each generated text hash (in-process determinism probe), then exit.
     #[arg(long, default_value_t = 0)]
     gate_probe: usize,
+    /// Extra explicit candidate(s) for the selected site, e.g. a hand
+    /// profile to wire in as-is: `--require GROUT_ATTN_BM_PREFILL=128,GROUT_ATTN_BN_PREFILL=128,GROUT_FMHA_PREFILL_OCCUPANCY=2`.
+    /// Repeatable. Measured before the grid (like the shipping incumbents),
+    /// logged, and eligible to win — the value 0 means "unset". Keys need
+    /// not be axes of the site (the engine honors any knob), but then use
+    /// `--site` to target one site.
+    #[arg(long)]
+    require: Vec<String>,
 }
 
 /// One tunable engine site: env-var axes, shape buckets, and an objective.
@@ -120,7 +128,18 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 // 0 = mapped kernel, 1 = LPT kernel; LPT-specific knobs
                 // (swizzle/sched/mask-split) ride engine defaults.
                 ("GROUT_FMHA_PREFILL_GQA_LPT", vec![0, 1]),
-                ("GROUT_ATTN_BM_PREFILL", vec![16, 32, 64, 128]),
+                // 1 = head-grouped GQA-mapped kernel (fmha_prefill_gqa_mapped),
+                // the third dispatch the legacy sweep_pp_tile.sh scanned and
+                // this space initially omitted. On the 5090 a paired check
+                // (15 vs 15, alternating) put its best cell at parity with
+                // the record (1.010 @2048, 0.992 @8192) — included for
+                // completeness of the space, not because it is expected to
+                // win. Zero is ELIDED from config ids (see ELIDE_ZERO_AXES)
+                // so trial logs recorded before the axis existed stay valid.
+                // Only meaningful with LPT=0 and small BM (the effective tile
+                // is BM x group); see prune().
+                ("GROUT_FMHA_PREFILL_GQA", vec![0, 1]),
+                ("GROUT_ATTN_BM_PREFILL", vec![4, 8, 16, 32, 64, 128]),
                 ("GROUT_ATTN_BN_PREFILL", vec![16, 32, 64, 128]),
                 ("GROUT_FMHA_PREFILL_OCCUPANCY", vec![1, 2]),
                 // num_worker_warps_per_cta (0 = compiler default). Full
@@ -308,6 +327,28 @@ fn verify_coverage(arch: &str, site: &Site) -> Result<()> {
 /// LPT-only hint axes are meaningless when the prefill_attention record for
 /// this arch runs the mapped kernel in every bucket; collapse them to the
 /// incumbent value so the search spends its budget on knobs that fire.
+/// Short stable tag of the prefill_attention record's winning config for a
+/// bucket ("none" when no record exists yet).
+fn base_config_tag(out_dir: &Path, bucket: &str) -> String {
+    let Ok(text) = fs::read_to_string(out_dir.join("prefill_attention.json")) else {
+        return "none".into();
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return "none".into();
+    };
+    let id = record["entries"]
+        .as_array()
+        .and_then(|es| es.iter().find(|e| e["bucket"].as_str() == Some(bucket)))
+        .and_then(|e| e["config"]["id"].as_str())
+        .unwrap_or("");
+    if id.is_empty() {
+        return "none".into();
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(id, &mut h);
+    format!("{:08x}", std::hash::Hasher::finish(&h) as u32)
+}
+
 fn restrict_lpt_hints(site: &mut Site, arch: &str, out_dir: &Path) {
     if site.name != "prefill_hints" {
         return;
@@ -350,7 +391,35 @@ fn restrict_lpt_hints(site: &mut Site, arch: &str, out_dir: &Path) {
     );
 }
 
-fn cartesian(axes: &[(&'static str, Vec<i64>)]) -> Vec<Config> {
+/// Axes added after trial logs already existed: a zero (= unset) value is
+/// omitted from the config instead of recorded as `KEY=0`, so config ids of
+/// the pre-existing grid are unchanged and resume keeps every prior trial.
+const ELIDE_ZERO_AXES: &[&str] = &["GROUT_FMHA_PREFILL_GQA"];
+
+/// Candidates that cannot express anything the rest of the grid does not.
+fn prune(site: &str, params: &[(&'static str, i64)]) -> bool {
+    let get = |k: &str| params.iter().find(|(n, _)| *n == k).map(|(_, v)| *v).unwrap_or(0);
+    if site == "prefill_attention" {
+        let gqa = get("GROUT_FMHA_PREFILL_GQA");
+        let lpt = get("GROUT_FMHA_PREFILL_GQA_LPT");
+        let bm = get("GROUT_ATTN_BM_PREFILL");
+        // LPT dispatch takes precedence in the engine: GQA=1 is inert there.
+        if gqa == 1 && lpt == 1 {
+            return true;
+        }
+        // The GQA-mapped tile is BM x group rows: 64/128 explode it, while
+        // 4/8 only make sense there (the causal/LPT kernels take BM >= 16).
+        if gqa == 1 && bm >= 64 {
+            return true;
+        }
+        if gqa == 0 && bm < 16 {
+            return true;
+        }
+    }
+    false
+}
+
+fn cartesian(site: &str, axes: &[(&'static str, Vec<i64>)]) -> Vec<Config> {
     let mut configs: Vec<Vec<(&'static str, i64)>> = vec![vec![]];
     for (name, values) in axes {
         configs = configs
@@ -366,8 +435,45 @@ fn cartesian(axes: &[(&'static str, Vec<i64>)]) -> Vec<Config> {
     }
     configs
         .into_iter()
-        .map(|params| Config::new(params.into_iter().map(|(k, v)| (k, ParamValue::Int(v)))))
+        .filter(|params| !prune(site, params))
+        .map(|params| {
+            Config::new(
+                params
+                    .into_iter()
+                    .filter(|(k, v)| !(ELIDE_ZERO_AXES.contains(k) && *v == 0))
+                    .map(|(k, v)| (k, ParamValue::Int(v))),
+            )
+        })
         .collect()
+}
+
+/// `KEY=V,KEY=V` from --require into a Config (elision rule applied so a
+/// spec naming a grid point gets the grid point's id).
+fn parse_required_config(spec: &str) -> Result<Config> {
+    let mut params: Vec<(String, ParamValue)> = Vec::new();
+    for item in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (k, v) = item
+            .split_once('=')
+            .with_context(|| format!("--require item {item:?} is not KEY=VALUE"))?;
+        let v: i64 = v
+            .trim()
+            .parse()
+            .with_context(|| format!("--require {k}: value {v:?} is not an integer"))?;
+        if ELIDE_ZERO_AXES.contains(&k.trim()) && v == 0 {
+            continue;
+        }
+        params.push((k.trim().to_string(), ParamValue::Int(v)));
+    }
+    anyhow::ensure!(!params.is_empty(), "--require {spec:?} names no parameters");
+    Ok(Config::new(params))
+}
+
+/// Incumbent membership with the elision rule: an absent elided key equals 0.
+fn config_matches(c: &Config, incumbent: &[(&'static str, i64)]) -> bool {
+    incumbent.iter().all(|(k, v)| match c.params.get(*k) {
+        Some(p) => *p == ParamValue::Int(*v),
+        None => *v == 0 && ELIDE_ZERO_AXES.contains(k),
+    })
 }
 
 fn apply_config(config: &Config) {
@@ -663,18 +769,20 @@ fn main() -> Result<()> {
         }
         restrict_lpt_hints(&mut site, &arch, &out_dir);
         verify_coverage(&arch, &site)?;
-        let mut configs = cartesian(&site.axes);
+        let mut configs = cartesian(site.name, &site.axes);
         // Visit the shipping incumbents first: a budget-truncated search
         // (--budget-min, per bucket) then always contains the config the
         // winner must beat, so a partial record can never be worse than
         // what ships. Stable sort keeps grid order for the rest.
         let incumbent_set = incumbents(&arch, site.name);
-        configs.sort_by_key(|c| {
-            !incumbent_set.iter().any(|inc| {
-                inc.iter()
-                    .all(|(k, v)| c.params.get(*k) == Some(&ParamValue::Int(*v)))
-            })
-        });
+        configs.sort_by_key(|c| !incumbent_set.iter().any(|inc| config_matches(c, inc)));
+        // Explicit --require configs go first of all; duplicates of a grid
+        // point are dropped by id so the trial log stays one entry per id.
+        for spec in args.require.iter().rev() {
+            let config = parse_required_config(spec)?;
+            configs.retain(|c| c.id != config.id);
+            configs.insert(0, config);
+        }
         println!(
             "site {} — {} candidates x {} buckets on {arch}",
             site.name,
@@ -687,7 +795,20 @@ fn main() -> Result<()> {
                 PathBuf::from(&args.prompt_dir).join(format!("pp_{}.txt", bucket.prompt_pp));
             let prompt = fs::read_to_string(&prompt_path)
                 .with_context(|| format!("prompt file {}", prompt_path.display()))?;
-            let trials_path = out_dir.join(format!("{}.{}.trials.jsonl", site.name, bucket.label));
+            // prefill_hints is coordinate descent on top of the
+            // prefill_attention winner, so its trials are only comparable
+            // while that base is unchanged: tag the log with the base
+            // config's id so a new attention winner starts a fresh log
+            // instead of resuming stale measurements.
+            let base_tag = if site.name == "prefill_hints" {
+                format!(".base-{}", base_config_tag(&out_dir, &bucket.label))
+            } else {
+                String::new()
+            };
+            let trials_path = out_dir.join(format!(
+                "{}.{}{}.trials.jsonl",
+                site.name, bucket.label, base_tag
+            ));
             let known = load_existing_trials(&trials_path);
             if !known.is_empty() {
                 println!("  [{}] resuming: {} prior trials", bucket.label, known.len());
