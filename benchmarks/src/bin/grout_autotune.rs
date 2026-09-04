@@ -120,7 +120,10 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 ("GROUT_ATTN_BM_PREFILL", vec![16, 32, 64, 128]),
                 ("GROUT_ATTN_BN_PREFILL", vec![16, 32, 64, 128]),
                 ("GROUT_FMHA_PREFILL_OCCUPANCY", vec![1, 2]),
-                ("GROUT_FMHA_PREFILL_WARPS", vec![0, 4]),
+                // num_worker_warps_per_cta (0 = compiler default). Full
+                // range, not just 4: the sm_100 08-23 run already moved
+                // two prefill buckets to warps=4 and wide prefill to 2.
+                ("GROUT_FMHA_PREFILL_WARPS", vec![0, 2, 4, 8]),
             ],
             buckets: [512usize, 2048, 8192]
                 .into_iter()
@@ -164,7 +167,7 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
             axes: vec![
                 ("GROUT_ATTN_BN_DECODE", vec![16, 32, 64, 128]),
                 ("GROUT_FMHA_NUM_KV_SPLITS", vec![4, 8, 16, 32]),
-                ("GROUT_FMHA_DECODE_WARPS", vec![0, 4]),
+                ("GROUT_FMHA_DECODE_WARPS", vec![0, 2, 4, 8]),
             ],
             // Canonical decode cells use a short prompt; tuning in a long
             // kv context (the first attempt used pp=512) skews winners.
