@@ -47,6 +47,7 @@ fn measured_trial(config_id: &str, median_ms: f32, min_ms: f32, reps: usize) -> 
 use grout::model::Qwen3Engine;
 use std::fs;
 use std::io::Write as _;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -160,10 +161,11 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
         // candidates here run with the prefill_attention record already
         // applied. Kept as its own site because the joint space (128 x 192
         // per bucket) is not searchable in an evening; the layering is the
-        // classic coordinate-descent compromise. LPT-only knobs (schedule,
-        // swizzle, mask-split) collapse to their incumbent when the
-        // prefill_attention record picked the mapped kernel everywhere
-        // (see restrict_lpt_hints).
+        // classic coordinate-descent compromise. Per bucket, knobs the base
+        // dispatch cannot see (LPT schedule/swizzle/mask-split under a
+        // mapped base; GQA group under a causal-mapped base) are pruned to
+        // one representative, so a causal-mapped base searches 4 live cells
+        // instead of 192 duplicates (see hints_inert_duplicate).
         Site {
             name: "prefill_hints",
             axes: vec![
@@ -349,46 +351,105 @@ fn base_config_tag(out_dir: &Path, bucket: &str) -> String {
     format!("{:08x}", std::hash::Hasher::finish(&h) as u32)
 }
 
-fn restrict_lpt_hints(site: &mut Site, arch: &str, out_dir: &Path) {
-    if site.name != "prefill_hints" {
-        return;
+/// The winning parameters recorded for `bucket` in `<out_dir>/<site>.json`.
+fn record_winner(out_dir: &Path, site: &str, bucket: &str) -> Option<BTreeMap<String, i64>> {
+    let text = fs::read_to_string(out_dir.join(format!("{site}.json"))).ok()?;
+    let record: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let entry = record["entries"]
+        .as_array()?
+        .iter()
+        .find(|e| e["bucket"].as_str() == Some(bucket))?;
+    let params = entry["config"]["params"].as_object()?;
+    Some(
+        params
+            .iter()
+            .filter_map(|(k, v)| v.as_i64().map(|v| (k.clone(), v)))
+            .collect(),
+    )
+}
+
+/// The prefill_attention winner a prefill_hints bucket runs on top of.
+fn base_config(out_dir: &Path, bucket: &str) -> Option<BTreeMap<String, i64>> {
+    record_winner(out_dir, "prefill_attention", bucket)
+}
+
+fn base_dispatch_name(base: &BTreeMap<String, i64>) -> &'static str {
+    let get = |k: &str| base.get(k).copied().unwrap_or(0);
+    if get("GROUT_FMHA_PREFILL_GQA_LPT") == 1 {
+        "LPT"
+    } else if get("GROUT_FMHA_PREFILL_GQA") == 1 {
+        "GQA-mapped"
+    } else {
+        "causal-mapped"
     }
-    let record_path = out_dir.join("prefill_attention.json");
-    let Ok(text) = fs::read_to_string(&record_path) else {
-        println!("  prefill_hints: no prefill_attention record yet; tuning LPT knobs too");
-        return;
+}
+
+/// Hint knobs the engine does not read under a given base dispatch. The
+/// LPT schedule/swizzle/mask-split knobs exist only in the LPT kernel; the
+/// GQA group is read by the LPT and GQA-mapped kernels but not by the
+/// causal-mapped one. Every other combination of the inert knobs is a
+/// re-measurement of the same kernel — 188 of the 192 hint candidates for a
+/// causal-mapped base (the 2026-09-04 B200 pp=8192 bucket).
+fn inert_hint_knobs(base: &BTreeMap<String, i64>) -> &'static [&'static str] {
+    const LPT_ONLY: &[&str] = &[
+        "GROUT_FMHA_PREFILL_LPT_SCHED",
+        "GROUT_FMHA_PREFILL_LPT_SWIZZLE",
+        "GROUT_FMHA_PREFILL_LPT_MASK_SPLIT",
+    ];
+    const LPT_ONLY_AND_GROUP: &[&str] = &[
+        "GROUT_FMHA_PREFILL_LPT_SCHED",
+        "GROUT_FMHA_PREFILL_LPT_SWIZZLE",
+        "GROUT_FMHA_PREFILL_LPT_MASK_SPLIT",
+        "GROUT_FMHA_PREFILL_GQA_GROUP",
+    ];
+    match base_dispatch_name(base) {
+        "LPT" => &[],
+        "GQA-mapped" => LPT_ONLY,
+        _ => LPT_ONLY_AND_GROUP,
+    }
+}
+
+/// A hint candidate is an inert duplicate when any knob the base cannot
+/// see is off its canonical (incumbent) value — exactly one representative
+/// per live combination survives. Without a base record nothing is pruned.
+fn hints_inert_duplicate(
+    c: &Config,
+    base: Option<&BTreeMap<String, i64>>,
+    canonical: &[(&'static str, i64)],
+) -> bool {
+    let Some(base) = base else {
+        return false;
     };
-    let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return;
-    };
-    let any_lpt = record["entries"]
-        .as_array()
-        .map(|entries| {
-            entries.iter().any(|e| {
-                e["config"]["params"]["GROUT_FMHA_PREFILL_GQA_LPT"].as_i64() == Some(1)
-            })
+    inert_hint_knobs(base).iter().any(|k| {
+        let canon = canonical
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| *v)
+            .unwrap_or(0);
+        let actual = match c.params.get(*k) {
+            Some(ParamValue::Int(v)) => *v,
+            _ => 0,
+        };
+        actual != canon
+    })
+}
+
+/// Number of knobs on which `c` differs from a reference configuration
+/// (absent = 0 on either side, matching the tuner's unset convention).
+fn config_distance(c: &Config, reference: &BTreeMap<String, i64>) -> usize {
+    let mut keys: std::collections::BTreeSet<&str> =
+        c.params.keys().map(String::as_str).collect();
+    keys.extend(reference.keys().map(String::as_str));
+    keys.into_iter()
+        .filter(|k| {
+            let a = match c.params.get(*k) {
+                Some(ParamValue::Int(v)) => *v,
+                _ => 0,
+            };
+            let b = reference.get(*k).copied().unwrap_or(0);
+            a != b
         })
-        .unwrap_or(true);
-    if any_lpt {
-        return;
-    }
-    let incumbent = incumbents(arch, "prefill_hints")
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-    for (key, values) in site.axes.iter_mut() {
-        if key.contains("_LPT_") {
-            let keep = incumbent
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| *v)
-                .unwrap_or(values[0]);
-            *values = vec![keep];
-        }
-    }
-    println!(
-        "  prefill_hints: record runs the mapped kernel everywhere; LPT-only axes fixed at incumbents"
-    );
+        .count()
 }
 
 /// Axes added after trial logs already existed: a zero (= unset) value is
@@ -763,30 +824,26 @@ fn main() -> Result<()> {
         // SAFETY: single-threaded, before any engine exists.
         unsafe { std::env::set_var("GROUT_TUNING_RECORD_DIR", &args.out_dir) };
     }
-    for mut site in sites(args.max_seq_len) {
+    for site in sites(args.max_seq_len) {
         if args.site != "all" && args.site != site.name {
             continue;
         }
-        restrict_lpt_hints(&mut site, &arch, &out_dir);
         verify_coverage(&arch, &site)?;
-        let mut configs = cartesian(site.name, &site.axes);
-        // Visit the shipping incumbents first: a budget-truncated search
-        // (--budget-min, per bucket) then always contains the config the
-        // winner must beat, so a partial record can never be worse than
-        // what ships. Stable sort keeps grid order for the rest.
+        // The declared space (space_hash is taken over this list); each
+        // bucket below prunes and orders its own copy.
+        let mut site_configs = cartesian(site.name, &site.axes);
         let incumbent_set = incumbents(&arch, site.name);
-        configs.sort_by_key(|c| !incumbent_set.iter().any(|inc| config_matches(c, inc)));
-        // Explicit --require configs go first of all; duplicates of a grid
-        // point are dropped by id so the trial log stays one entry per id.
+        // Explicit --require configs; duplicates of a grid point are
+        // dropped by id so the trial log stays one entry per id.
         for spec in args.require.iter().rev() {
             let config = parse_required_config(spec)?;
-            configs.retain(|c| c.id != config.id);
-            configs.insert(0, config);
+            site_configs.retain(|c| c.id != config.id);
+            site_configs.insert(0, config);
         }
         println!(
-            "site {} — {} candidates x {} buckets on {arch}",
+            "site {} — {} declared candidates x {} buckets on {arch}",
             site.name,
-            configs.len(),
+            site_configs.len(),
             site.buckets.len()
         );
         let mut entries: Vec<RecordEntry> = Vec::new();
@@ -809,6 +866,64 @@ fn main() -> Result<()> {
                 "{}.{}{}.trials.jsonl",
                 site.name, bucket.label, base_tag
             ));
+
+            // Per-bucket candidate list: prune knobs the base dispatch
+            // makes inert, then order by distance from what is known to be
+            // good, so a budget cut (or an impatient operator) leaves the
+            // informative neighborhood measured and the far corners unmeasured
+            // — never the other way round.
+            let mut configs = site_configs.clone();
+            if site.name == "prefill_hints" {
+                let base = base_config(&out_dir, &bucket.label);
+                let canonical = incumbent_set.first().cloned().unwrap_or_default();
+                let before = configs.len();
+                configs.retain(|c| !hints_inert_duplicate(c, base.as_ref(), &canonical));
+                match &base {
+                    Some(b) => println!(
+                        "  [{}] base {}: {} of {} hint candidates are live for this dispatch \
+                         ({} inert duplicates pruned)",
+                        bucket.label,
+                        base_dispatch_name(b),
+                        configs.len(),
+                        before,
+                        before - configs.len()
+                    ),
+                    None => println!(
+                        "  [{}] no prefill_attention record yet: tuning all {} hint candidates",
+                        bucket.label, before
+                    ),
+                }
+            }
+            // Reference points: shipping incumbents plus this bucket's
+            // current record winner, if any. Required configs stay first,
+            // then incumbents, then everything else by Hamming distance to
+            // the nearest reference (stable, so grid order breaks ties).
+            let mut references: Vec<BTreeMap<String, i64>> = incumbent_set
+                .iter()
+                .map(|inc| inc.iter().map(|(k, v)| (k.to_string(), *v)).collect())
+                .collect();
+            if let Some(winner) = record_winner(&out_dir, site.name, &bucket.label) {
+                references.push(winner);
+            }
+            let required: Vec<String> = args
+                .require
+                .iter()
+                .filter_map(|s| parse_required_config(s).ok().map(|c| c.id))
+                .collect();
+            configs.sort_by_key(|c| {
+                if required.contains(&c.id) {
+                    return (0usize, 0usize);
+                }
+                if incumbent_set.iter().any(|inc| config_matches(c, inc)) {
+                    return (1, 0);
+                }
+                let d = references
+                    .iter()
+                    .map(|r| config_distance(c, r))
+                    .min()
+                    .unwrap_or(0);
+                (2, d)
+            });
             let known = load_existing_trials(&trials_path);
             if !known.is_empty() {
                 println!("  [{}] resuming: {} prior trials", bucket.label, known.len());
@@ -892,7 +1007,7 @@ fn main() -> Result<()> {
             source_hash: grout::kernels::_SOURCE_HASH.to_string(),
             arch: arch.clone(),
             tileiras_fingerprint: tileiras.clone(),
-            space_hash: Some(space_hash(&configs)),
+            space_hash: Some(space_hash(&site_configs)),
         };
         let mut record = Record::new(&ws);
         record.entries = entries;
