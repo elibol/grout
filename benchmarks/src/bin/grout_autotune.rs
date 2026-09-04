@@ -48,7 +48,6 @@ use grout::model::Qwen3Engine;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
@@ -406,6 +405,8 @@ fn clear_config(config: &Config) {
 struct EngineOracle<'a> {
     configs: Vec<Config>,
     engine: Option<Qwen3Engine>,
+    model_dir: PathBuf,
+    max_seq_len: usize,
     rt: &'a tokio::runtime::Runtime,
     prompt: String,
     max_new_tokens: usize,
@@ -441,31 +442,42 @@ fn is_alloc_failure(e: &anyhow::Error) -> bool {
     is_alloc_reason(&format!("{e:#}"))
 }
 
-/// Trials completed by this process. The engine accumulates device state
-/// across candidates (the process-global JIT kernel cache has no eviction
-/// in cutile-rs 0.3.1, plus per-specialization pools), so after enough
-/// configs allocations start failing for reasons that have nothing to do
-/// with the candidate. Policy: an allocation failure after at least one
-/// completed trial is treated as the leak — the process exits with code 3
-/// WITHOUT logging the candidate, `autotune_loop.sh` restarts it, and the
-/// resumed search measures that candidate first in a fresh process. An
-/// allocation failure with zero completed trials (fresh process) is the
-/// candidate's own and is recorded `Invalid`. The 2026-09-04 B200 run
-/// showed why the in-process "reload the engine" fallback was not enough:
-/// after one reload every remaining pp=8192 candidate came back OOM.
-static TRIALS_THIS_PROCESS: AtomicUsize = AtomicUsize::new(0);
-
+/// Last resort when in-process recovery itself fails (the engine cannot be
+/// reloaded): exit non-zero WITHOUT logging the candidate so
+/// `autotune_loop.sh` restarts a fresh process, whose resumed search
+/// measures that candidate first.
 fn exit_for_fresh_process(context: &str) -> ! {
     eprintln!(
-        "  device allocation failure {context} after {} completed trial(s) in this process — \
-         exiting with code 3 so autotune_loop.sh restarts a fresh process (nothing logged \
-         for the interrupted candidate; the resumed search measures it first)",
-        TRIALS_THIS_PROCESS.load(Ordering::Relaxed)
+        "  device allocation failure {context} — exiting with code 3 so autotune_loop.sh \
+         restarts a fresh process (nothing logged for the interrupted candidate; the resumed \
+         search measures it first)"
     );
     std::process::exit(3);
 }
 
 impl EngineOracle<'_> {
+    /// A sweep churns kernel specializations by design, and cutile's
+    /// in-memory (L1) kernel cache is intentionally unbounded — every
+    /// candidate's modules stay resident until evicted. After enough
+    /// candidates, allocations fail for reasons that have nothing to do
+    /// with the candidate. Dropping the engine alone does not help (the
+    /// 2026-09-04 B200 run: after one reload every remaining pp=8192
+    /// candidate came back OOM) — the modules live in the process-global
+    /// cache, not in the engine. Recovery: drop the engine (its CUDA graphs
+    /// and warm registry reference cached modules), quiesce the device so no
+    /// cached kernel can still be executing (the eviction API's safety
+    /// contract), evict every cached specialization, reload. The reload
+    /// recompiles what it needs; the disk cache serves stage 2.
+    fn recover_device_state(&mut self) -> Result<usize> {
+        self.engine = None;
+        grout::model::device_synchronize();
+        // SAFETY: the engine — the only launcher of cached kernels in this
+        // process — has been dropped and the device synchronized above, so
+        // no cached module can still be executing on any stream.
+        let evicted = unsafe { cutile::tile_kernel::clear_kernel_cache() };
+        self.engine = Some(load_engine(self.rt, &self.model_dir, self.max_seq_len)?);
+        Ok(evicted)
+    }
 
     fn step_ms(&mut self) -> Result<(f32, String)> {
         let engine = self.engine.as_mut().expect("engine");
@@ -524,25 +536,45 @@ impl Objective for EngineOracle<'_> {
     }
 
     fn measure(&mut self, index: usize) -> Trial {
-        let trial = match self.measure_inner(index) {
-            Ok(t) => t,
-            Err(e) if is_alloc_failure(&e) => {
-                clear_config(&self.configs[index]);
-                if TRIALS_THIS_PROCESS.load(Ordering::Relaxed) > 0 {
-                    let _ = self.log.flush();
-                    exit_for_fresh_process(&format!("on candidate {}", self.configs[index].id));
+        let id = self.configs[index].id.clone();
+        let mut recovered = false;
+        let trial = loop {
+            match self.measure_inner(index) {
+                Ok(t) => break t,
+                Err(e) if is_alloc_failure(&e) => {
+                    clear_config(&self.configs[index]);
+                    if !recovered {
+                        recovered = true;
+                        match self.recover_device_state() {
+                            Ok(evicted) => {
+                                eprintln!(
+                                    "  device allocation failure on {id}: engine dropped, \
+                                     {evicted} cached kernel specialization(s) evicted, engine \
+                                     reloaded — retrying once"
+                                );
+                                continue;
+                            }
+                            Err(err) => {
+                                let _ = self.log.flush();
+                                exit_for_fresh_process(&format!(
+                                    "on {id} (in-process recovery failed: {err:#})"
+                                ));
+                            }
+                        }
+                    }
+                    // Failed again on a fresh engine with an empty kernel
+                    // cache: this one is the candidate's own.
+                    break invalid_trial(
+                        &id,
+                        format!("device allocation failure after in-process recovery: {e:#}"),
+                    );
                 }
-                invalid_trial(
-                    &self.configs[index].id,
-                    format!("device allocation failure in a fresh process: {e:#}"),
-                )
+                Err(e) => break invalid_trial(&id, format!("harness error: {e:#}")),
             }
-            Err(e) => invalid_trial(&self.configs[index].id, format!("harness error: {e:#}")),
         };
         if let Ok(line) = serde_json::to_string(&trial) {
             let _ = writeln!(self.log, "{line}");
         }
-        TRIALS_THIS_PROCESS.fetch_add(1, Ordering::Relaxed);
         match &trial.state {
             TrialState::Measured { median_ms, .. } => {
                 println!("  {} -> {median_ms:.2} ms", trial.config_id)
@@ -672,6 +704,8 @@ fn main() -> Result<()> {
                     Some(e) => e,
                     None => load_engine(&rt, &model_dir, args.max_seq_len)?,
                 }),
+                model_dir: model_dir.clone(),
+                max_seq_len: args.max_seq_len,
                 rt: &rt,
                 prompt,
                 max_new_tokens: bucket.max_new_tokens,
@@ -683,12 +717,21 @@ fn main() -> Result<()> {
                 log,
             };
             let reference = match oracle.step_ms() {
-                Err(e)
-                    if is_alloc_failure(&e)
-                        && TRIALS_THIS_PROCESS.load(Ordering::Relaxed) > 0 =>
-                {
-                    exit_for_fresh_process(&format!("at the [{}] reference step", bucket.label));
-                }
+                Err(e) if is_alloc_failure(&e) => match oracle.recover_device_state() {
+                    Ok(evicted) => {
+                        eprintln!(
+                            "  [{}] device allocation failure at the reference step: engine \
+                             dropped, {evicted} cached kernel specialization(s) evicted, engine \
+                             reloaded — retrying once",
+                            bucket.label
+                        );
+                        oracle.step_ms()?
+                    }
+                    Err(err) => exit_for_fresh_process(&format!(
+                        "at the [{}] reference step (in-process recovery failed: {err:#})",
+                        bucket.label
+                    )),
+                },
                 other => other?,
             };
             oracle.reference_text = Some(reference.1);
