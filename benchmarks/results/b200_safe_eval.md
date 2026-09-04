@@ -1543,3 +1543,54 @@ canonical tg=128 wrapper builds its graph at 4096. `NKS=32` is within noise of
 the winner at 16384 but loses decisively to shipping `NKS=4` at 4096. The
 decode bucket must tune at the canonical graph bound, or persistence must
 bucket on that bound, before this record can ship.
+
+## sm_100 cutile-rs 0.3.1 prefill retune and parity gate
+
+Date: 2026-09-04
+
+- grout tuning parent: `69e2128` (`safe-kernels`)
+- cutile-rs: crates.io `0.3.1` (no sibling checkout)
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B, default clocks
+- prompt source: `benchmarks/results/sweep/20260822_132652/prompts`
+
+Status: **PASS — records are no slower than the shipping profile within the
++2% limit at all three required pure-prefill cells.** The three record files
+are eligible to commit. Trial logs remain local and are not committed.
+
+### Prefill-only tuning
+
+All three startup coverage assertions passed, and each wrapper exited cleanly
+after one run. `prefill_hints` did not print `LPT-only axes fixed at
+incumbents`. The pp=8192 attention and hints searches each hit a decode-graph
+allocation failure and reloaded the engine; the remaining candidates then
+reported OOM-invalid results. Counts below include only successfully measured
+candidates, not invalid entries.
+
+| site / bucket | selected configuration | measured candidates | tuner median (ms) |
+|---|---|---:|---:|
+| prefill attention, pp=512 | LPT=1, BM=16, BN=64, occupancy=2, warps=4 | 235 / 256 | 32.06 |
+| prefill attention, pp=2048 | LPT=0, BM=16, BN=128, occupancy=2, warps=default | 123 / 256 | 114.36 |
+| prefill attention, pp=8192 | LPT=0, BM=16, BN=128, occupancy=2, warps=default | 56 / 256 | 506.19 |
+| prefill hints, pp=512 | group=0, latency=1, mask split=auto, sched=1, swizzle=0 | 192 / 192 | 31.90 |
+| prefill hints, pp=2048 | group=8, latency=1, mask split=auto, sched=1, swizzle=8 | 192 / 192 | 112.96 |
+| prefill hints, pp=8192 | group=0, latency=1, mask split=1, sched=3, swizzle=8 | 53 / 192 | 502.86 |
+| wide prefill, pp=2048 | BM=16, warps=2 | 12 / 12 | 113.23 |
+| wide prefill, pp=8192 | BM=32, warps=1 | 12 / 12 | 501.23 |
+
+### Three-arm paired prefill parity gate
+
+Each arm invocation loaded Qwen3-32B, used the exact raw prompt with zero
+generated tokens, ran one discarded warmup, and recorded three measurements.
+The three rounds used records/built-ins/shipping,
+shipping/built-ins/records, then records/built-ins/shipping order. Built-ins
+set `GROUT_TUNING_RECORD_DIR=/nonexistent`; shipping also disabled records and
+used the cell values from `sweep_pp_sm100.sh`.
+
+Values are per-round means of three pure-prefill measurements. Overall values
+are means over all nine measurements for each arm.
+
+| cell / metric | records rounds (ms) | built-ins rounds (ms) | shipping rounds (ms) | overall records / built-ins / shipping (ms) | records vs shipping | gate |
+|---|---:|---:|---:|---:|---:|---|
+| pp=512 prefill | 28.82 / 29.36 / 28.77 | 33.85 / 33.44 / 33.46 | 29.46 / 29.02 / 29.90 | 28.98 / 33.59 / 29.46 | -1.61% | **PASS** |
+| pp=2048 prefill | 115.60 / 113.21 / 112.43 | 113.68 / 114.21 / 116.28 | 115.58 / 117.29 / 116.44 | 113.75 / 114.72 / 116.44 | -2.31% | **PASS** |
+| pp=8192 prefill | 502.14 / 500.02 / 500.00 | 531.77 / 531.21 / 528.57 | 504.55 / 505.80 / 499.51 | 500.72 / 530.52 / 503.29 | -0.51% | **PASS** |
