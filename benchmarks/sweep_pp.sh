@@ -301,6 +301,7 @@ fi
 log "Benchmark: SGLang (no-radix)"
 SGLANG_PYTHON="$(venv_python sglang_env)"
 if [[ "${SWEEP_ENABLE_BASELINES:-1}" == 1 ]] && [[ -n "$SGLANG_PYTHON" ]] && "$SGLANG_PYTHON" -c "import sglang" 2>/dev/null; then
+    echo " sglang_version=$("$SGLANG_PYTHON" -c 'import sglang, torch; print(sglang.__version__, "torch", torch.__version__)' 2>/dev/null)"
     for PP in "${PP_VALUES[@]}"; do
         RUN_BENCH_REPS="$(bench_reps_for_pp "$PP")"
         echo ""
@@ -329,6 +330,10 @@ fi
 log "Benchmark: vLLM (cuda-graph, prefix-cache OFF)"
 VLLM_PYTHON="$(venv_python vllm_env)"
 if [[ "${SWEEP_ENABLE_BASELINES:-1}" == 1 ]] && [[ -n "$VLLM_PYTHON" ]] && "$VLLM_PYTHON" -c "import vllm" 2>/dev/null; then
+    # Baseline provenance in the summary: the bench scripts' tail output
+    # does not carry the engine version, and cross-session comparisons
+    # need it.
+    echo " vllm_version=$("$VLLM_PYTHON" -c 'import vllm, torch; print(vllm.__version__, "torch", torch.__version__)' 2>/dev/null)"
     for PP in "${PP_VALUES[@]}"; do
         RUN_BENCH_REPS="$(bench_reps_for_pp "$PP")"
         echo ""

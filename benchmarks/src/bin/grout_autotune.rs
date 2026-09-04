@@ -48,6 +48,7 @@ use grout::model::Qwen3Engine;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
@@ -405,8 +406,6 @@ fn clear_config(config: &Config) {
 struct EngineOracle<'a> {
     configs: Vec<Config>,
     engine: Option<Qwen3Engine>,
-    model_dir: PathBuf,
-    max_seq_len: usize,
     rt: &'a tokio::runtime::Runtime,
     prompt: String,
     max_new_tokens: usize,
@@ -431,26 +430,42 @@ fn load_engine(
     Ok(engine)
 }
 
+fn is_alloc_reason(msg: &str) -> bool {
+    msg.contains("ALLOC_FAILED")
+        || msg.contains("OUT_OF_MEMORY")
+        || msg.contains("OutOfMemory")
+        || msg.contains("out of memory")
+}
+
 fn is_alloc_failure(e: &anyhow::Error) -> bool {
-    let msg = format!("{e:#}");
-    msg.contains("ALLOC_FAILED") || msg.contains("OUT_OF_MEMORY") || msg.contains("OutOfMemory")
+    is_alloc_reason(&format!("{e:#}"))
+}
+
+/// Trials completed by this process. The engine accumulates device state
+/// across candidates (the process-global JIT kernel cache has no eviction
+/// in cutile-rs 0.3.1, plus per-specialization pools), so after enough
+/// configs allocations start failing for reasons that have nothing to do
+/// with the candidate. Policy: an allocation failure after at least one
+/// completed trial is treated as the leak — the process exits with code 3
+/// WITHOUT logging the candidate, `autotune_loop.sh` restarts it, and the
+/// resumed search measures that candidate first in a fresh process. An
+/// allocation failure with zero completed trials (fresh process) is the
+/// candidate's own and is recorded `Invalid`. The 2026-09-04 B200 run
+/// showed why the in-process "reload the engine" fallback was not enough:
+/// after one reload every remaining pp=8192 candidate came back OOM.
+static TRIALS_THIS_PROCESS: AtomicUsize = AtomicUsize::new(0);
+
+fn exit_for_fresh_process(context: &str) -> ! {
+    eprintln!(
+        "  device allocation failure {context} after {} completed trial(s) in this process — \
+         exiting with code 3 so autotune_loop.sh restarts a fresh process (nothing logged \
+         for the interrupted candidate; the resumed search measures it first)",
+        TRIALS_THIS_PROCESS.load(Ordering::Relaxed)
+    );
+    std::process::exit(3);
 }
 
 impl EngineOracle<'_> {
-    /// The engine accumulates per-specialization device state across trials
-    /// (JIT modules, pools); after enough configs it exhausts VRAM. On an
-    /// allocation-flavored failure, rebuild the engine (fresh context frees
-    /// everything) and let the caller retry — a leak must never masquerade
-    /// as an invalid candidate.
-    fn reload_engine(&mut self) -> Result<()> {
-        eprintln!("  (device allocation failure — reloading engine)");
-        // Drop first and drain the async frees; loading before dropping
-        // would hold two engines resident and OOM the reload itself.
-        self.engine = None;
-        grout::model::device_synchronize();
-        self.engine = Some(load_engine(self.rt, &self.model_dir, self.max_seq_len)?);
-        Ok(())
-    }
 
     fn step_ms(&mut self) -> Result<(f32, String)> {
         let engine = self.engine.as_mut().expect("engine");
@@ -469,15 +484,13 @@ impl EngineOracle<'_> {
         let config = self.configs[index].clone();
         apply_config(&config);
         // Warmup step doubles as the compile/launch/correctness gate.
-        let mut first = self.step_ms();
-        if let Err(e) = &first {
-            if is_alloc_failure(e) {
-                self.reload_engine()?;
-                first = self.step_ms();
-            }
-        }
-        let (_, text) = match first {
+        let (_, text) = match self.step_ms() {
             Ok(v) => v,
+            // Allocation failures are decided by `measure` (leak vs genuine).
+            Err(e) if is_alloc_failure(&e) => {
+                clear_config(&config);
+                return Err(e);
+            }
             Err(e) => {
                 clear_config(&config);
                 return Ok(invalid_trial(
@@ -511,12 +524,25 @@ impl Objective for EngineOracle<'_> {
     }
 
     fn measure(&mut self, index: usize) -> Trial {
-        let trial = self.measure_inner(index).unwrap_or_else(|e| {
-            invalid_trial(&self.configs[index].id, format!("harness error: {e:#}"))
-        });
+        let trial = match self.measure_inner(index) {
+            Ok(t) => t,
+            Err(e) if is_alloc_failure(&e) => {
+                clear_config(&self.configs[index]);
+                if TRIALS_THIS_PROCESS.load(Ordering::Relaxed) > 0 {
+                    let _ = self.log.flush();
+                    exit_for_fresh_process(&format!("on candidate {}", self.configs[index].id));
+                }
+                invalid_trial(
+                    &self.configs[index].id,
+                    format!("device allocation failure in a fresh process: {e:#}"),
+                )
+            }
+            Err(e) => invalid_trial(&self.configs[index].id, format!("harness error: {e:#}")),
+        };
         if let Ok(line) = serde_json::to_string(&trial) {
             let _ = writeln!(self.log, "{line}");
         }
+        TRIALS_THIS_PROCESS.fetch_add(1, Ordering::Relaxed);
         match &trial.state {
             TrialState::Measured { median_ms, .. } => {
                 println!("  {} -> {median_ms:.2} ms", trial.config_id)
@@ -542,6 +568,13 @@ fn load_existing_trials(path: &Path) -> Vec<Trial> {
     content
         .lines()
         .filter_map(|l| serde_json::from_str::<Trial>(l).ok())
+        // An OOM-flavored Invalid was recorded against the candidate by
+        // older tuner builds when the engine had leaked (2026-09-04 B200
+        // pp=8192 logs). Treat those as unvisited so resume re-measures them.
+        .filter(|t| match &t.state {
+            TrialState::Invalid { reason } => !is_alloc_reason(reason),
+            _ => true,
+        })
         .collect()
 }
 
@@ -639,8 +672,6 @@ fn main() -> Result<()> {
                     Some(e) => e,
                     None => load_engine(&rt, &model_dir, args.max_seq_len)?,
                 }),
-                model_dir: model_dir.clone(),
-                max_seq_len: args.max_seq_len,
                 rt: &rt,
                 prompt,
                 max_new_tokens: bucket.max_new_tokens,
@@ -651,14 +682,16 @@ fn main() -> Result<()> {
                     .then(|| Instant::now() + Duration::from_secs(args.budget_min * 60)),
                 log,
             };
-            let mut reference = oracle.step_ms();
-            if let Err(e) = &reference {
-                if is_alloc_failure(e) {
-                    oracle.reload_engine()?;
-                    reference = oracle.step_ms();
+            let reference = match oracle.step_ms() {
+                Err(e)
+                    if is_alloc_failure(&e)
+                        && TRIALS_THIS_PROCESS.load(Ordering::Relaxed) > 0 =>
+                {
+                    exit_for_fresh_process(&format!("at the [{}] reference step", bucket.label));
                 }
-            }
-            oracle.reference_text = Some(reference?.1);
+                other => other?,
+            };
+            oracle.reference_text = Some(reference.1);
 
             println!("  [{}] searching...", bucket.label);
             let trials = GridSearch::new().resume(known).search(&mut oracle);
