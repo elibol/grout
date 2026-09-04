@@ -67,7 +67,10 @@ struct Args {
     /// Max sequence length for the engine (bounds which pp buckets run).
     #[arg(long, default_value_t = 16384)]
     max_seq_len: usize,
-    /// Wall-clock budget per site, minutes (0 = none).
+    /// Wall-clock budget per BUCKET, minutes (0 = none). Shipping incumbents
+    /// are visited first, so a truncated search still yields a record no
+    /// worse than what ships; rerun without a budget to finish the grid
+    /// (trial logs resume).
     #[arg(long, default_value_t = 0)]
     budget_min: u64,
     /// Debug: run the default config N times on the first bucket and print
@@ -595,7 +598,18 @@ fn main() -> Result<()> {
         }
         restrict_lpt_hints(&mut site, &arch, &out_dir);
         verify_coverage(&arch, &site)?;
-        let configs = cartesian(&site.axes);
+        let mut configs = cartesian(&site.axes);
+        // Visit the shipping incumbents first: a budget-truncated search
+        // (--budget-min, per bucket) then always contains the config the
+        // winner must beat, so a partial record can never be worse than
+        // what ships. Stable sort keeps grid order for the rest.
+        let incumbent_set = incumbents(&arch, site.name);
+        configs.sort_by_key(|c| {
+            !incumbent_set.iter().any(|inc| {
+                inc.iter()
+                    .all(|(k, v)| c.params.get(*k) == Some(&ParamValue::Int(*v)))
+            })
+        });
         println!(
             "site {} — {} candidates x {} buckets on {arch}",
             site.name,
