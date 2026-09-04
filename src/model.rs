@@ -1674,6 +1674,19 @@ impl Qwen3Engine {
             .unwrap_or(default)
     }
 
+    /// Boolean knob with the same precedence. Record convention (from the
+    /// tuner's "0 = unset" rule): a positive value is `true`, a negative
+    /// value is an explicit `false`, and 0 falls through to the default.
+    fn tuned_bool(&self, key: &str, q_len: usize, default: bool) -> bool {
+        if std::env::var(key).is_ok() {
+            return env_bool_or(key, default);
+        }
+        match self.tuned.get(key, q_len) {
+            Some(0) | None => default,
+            Some(v) => v > 0,
+        }
+    }
+
     /// Same precedence for optional hints (None = compiler default).
     fn tuned_hint(&self, key: &str, q_len: usize) -> Option<usize> {
         if std::env::var(key).is_ok() {
@@ -5993,7 +6006,7 @@ impl Qwen3Engine {
                 }
                 if use_gqa_lpt {
                     let qgs = query_group_size as usize;
-                    let group_env = env_usize_or("GROUT_FMHA_PREFILL_GQA_GROUP", 0);
+                    let group_env = self.tuned_usize("GROUT_FMHA_PREFILL_GQA_GROUP", q_len, 0);
                     let group = if group_env == 0 { qgs } else { group_env };
                     ensure!(
                         group >= 1 && qgs % group == 0,
@@ -6007,20 +6020,23 @@ impl Qwen3Engine {
                     );
                     let m_eff = attn_bm * group;
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
-                    let prefill_latency =
-                        env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
+                    let prefill_latency = self.tuned_usize(
+                        "GROUT_FMHA_PREFILL_LATENCY",
+                        q_len,
+                        FMHA_PREFILL_LATENCY_DEFAULT,
+                    );
                     let prefill_occupancy = self.tuned_occupancy(
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
                         q_len,
                         FMHA_PREFILL_OCCUPANCY_DEFAULT,
                     );
-                    let prefill_sched = env_usize_or("GROUT_FMHA_PREFILL_LPT_SCHED", 1);
+                    let prefill_sched = self.tuned_usize("GROUT_FMHA_PREFILL_LPT_SCHED", q_len, 1);
                     ensure!(
                         prefill_sched <= 3,
                         "GROUT_FMHA_PREFILL_LPT_SCHED={prefill_sched} must be in 0..=3"
                     );
                     let prefill_mask_split =
-                        if env_bool_or("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", true) {
+                        if self.tuned_bool("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", q_len, true) {
                             1
                         } else {
                             0
@@ -6029,7 +6045,7 @@ impl Qwen3Engine {
                     let num_head_groups = self.cfg.num_attention_heads / group;
                     let swizzle_default =
                         prefill_lpt_swizzle(q_len, self.cfg.head_dim, num_head_groups);
-                    let swizzle_env = env_usize_or("GROUT_FMHA_PREFILL_LPT_SWIZZLE", 0);
+                    let swizzle_env = self.tuned_usize("GROUT_FMHA_PREFILL_LPT_SWIZZLE", q_len, 0);
                     let swizzle = if swizzle_env == 0 {
                         swizzle_default
                     } else {
@@ -6114,7 +6130,7 @@ impl Qwen3Engine {
                     // Must divide query_group_size. For Qwen3 qgs=4, valid
                     // values: {1, 2, 4}. Default = qgs (unchanged from old
                     // behavior, kv_head_idx = pid.1 directly).
-                    let group_env = env_usize_or("GROUT_FMHA_PREFILL_GQA_GROUP", 0);
+                    let group_env = self.tuned_usize("GROUT_FMHA_PREFILL_GQA_GROUP", q_len, 0);
                     let group = if group_env == 0 { qgs } else { group_env };
                     ensure!(
                         group >= 1 && qgs % group == 0,
@@ -6123,8 +6139,11 @@ impl Qwen3Engine {
                     );
                     let m_eff = attn_bm * group;
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
-                    let prefill_latency =
-                        env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
+                    let prefill_latency = self.tuned_usize(
+                        "GROUT_FMHA_PREFILL_LATENCY",
+                        q_len,
+                        FMHA_PREFILL_LATENCY_DEFAULT,
+                    );
                     let prefill_occupancy = self.tuned_occupancy(
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
                         q_len,
@@ -6171,8 +6190,11 @@ impl Qwen3Engine {
                     result.0.unpartition()
                 } else if use_prefill_kernel {
                     let even_k: i32 = if kv_len % (attn_bn as i32) == 0 { 1 } else { 0 };
-                    let prefill_latency =
-                        env_usize_or("GROUT_FMHA_PREFILL_LATENCY", FMHA_PREFILL_LATENCY_DEFAULT);
+                    let prefill_latency = self.tuned_usize(
+                        "GROUT_FMHA_PREFILL_LATENCY",
+                        q_len,
+                        FMHA_PREFILL_LATENCY_DEFAULT,
+                    );
                     let prefill_occupancy = self.tuned_occupancy(
                         "GROUT_FMHA_PREFILL_OCCUPANCY",
                         q_len,

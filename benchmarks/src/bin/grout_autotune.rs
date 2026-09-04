@@ -19,7 +19,7 @@
 //! Usage:
 //!   grout_autotune --model ../hf_models/qwen3_4b \
 //!       --prompt-dir benchmarks/results/sweep/<ts>/prompts \
-//!       [--site prefill_attention|decode_attention|wide_prefill|all] \
+//!       [--site prefill_attention|prefill_hints|decode_attention|wide_prefill|all] \
 //!       [--out-dir benchmarks/tuning] [--reps 3]
 //!
 //! Trials append to `<out-dir>/<arch>/<site>.<bucket>.trials.jsonl`; an
@@ -128,6 +128,37 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 .map(pp_bucket)
                 .collect(),
         },
+        // Architecture-specific optimization hints for the prefill attention
+        // kernels, tuned as a second layer ON TOP of the tile/dispatch winners
+        // above: the engine resolves every knob env > record > default, and
+        // the driver reloads the engine after each site's record is saved, so
+        // candidates here run with the prefill_attention record already
+        // applied. Kept as its own site because the joint space (128 x 192
+        // per bucket) is not searchable in an evening; the layering is the
+        // classic coordinate-descent compromise. LPT-only knobs (schedule,
+        // swizzle, mask-split) collapse to their incumbent when the
+        // prefill_attention record picked the mapped kernel everywhere
+        // (see restrict_lpt_hints).
+        Site {
+            name: "prefill_hints",
+            axes: vec![
+                // load_pipelined depth for the K/V loads (engine default 2).
+                ("GROUT_FMHA_PREFILL_LATENCY", vec![1, 2, 3, 4]),
+                // GQA heads per CTA (0 = query_group_size, i.e. all of them).
+                ("GROUT_FMHA_PREFILL_GQA_GROUP", vec![0, 2, 4, 8]),
+                // LPT schedule: 1 = linear, 2/3 = swizzled (reverse/forward).
+                ("GROUT_FMHA_PREFILL_LPT_SCHED", vec![1, 2, 3]),
+                // LPT swizzle width (0 = derived from L2 budget).
+                ("GROUT_FMHA_PREFILL_LPT_SWIZZLE", vec![0, 8]),
+                // Boolean: -1 = explicit off (see apply_config), 1 = on.
+                ("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", vec![-1, 1]),
+            ],
+            buckets: [512usize, 2048, 8192]
+                .into_iter()
+                .filter(|pp| *pp < max_seq_len)
+                .map(pp_bucket)
+                .collect(),
+        },
         Site {
             name: "decode_attention",
             axes: vec![
@@ -200,6 +231,28 @@ fn incumbents(arch: &str, site: &str) -> Vec<Vec<(&'static str, i64)>> {
                 ("GROUT_FMHA_PREFILL_WARPS", 0),
             ],
         ],
+        (_, "prefill_hints") if arch.starts_with("sm_100") => vec![
+            // sweep_pp_sm100.sh pp=2048/8192: latency 2, group auto, LPT
+            // knobs (swizzle 8 / sched 1 / mask-split off) — inert while the
+            // incumbent runs the mapped kernel, but the profile sets them.
+            vec![
+                ("GROUT_FMHA_PREFILL_LATENCY", 2),
+                ("GROUT_FMHA_PREFILL_GQA_GROUP", 0),
+                ("GROUT_FMHA_PREFILL_LPT_SCHED", 1),
+                ("GROUT_FMHA_PREFILL_LPT_SWIZZLE", 8),
+                ("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", -1),
+            ],
+        ],
+        (_, "prefill_hints") => vec![
+            // sm_120 records run LPT with engine defaults for every hint.
+            vec![
+                ("GROUT_FMHA_PREFILL_LATENCY", 2),
+                ("GROUT_FMHA_PREFILL_GQA_GROUP", 0),
+                ("GROUT_FMHA_PREFILL_LPT_SCHED", 1),
+                ("GROUT_FMHA_PREFILL_LPT_SWIZZLE", 0),
+                ("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", 1),
+            ],
+        ],
         (_, "decode_attention") if arch.starts_with("sm_100") => vec![
             // sweep_tg_sm100.sh TG_128 cell.
             vec![
@@ -246,6 +299,51 @@ fn verify_coverage(arch: &str, site: &Site) -> Result<()> {
     Ok(())
 }
 
+/// LPT-only hint axes are meaningless when the prefill_attention record for
+/// this arch runs the mapped kernel in every bucket; collapse them to the
+/// incumbent value so the search spends its budget on knobs that fire.
+fn restrict_lpt_hints(site: &mut Site, arch: &str, out_dir: &Path) {
+    if site.name != "prefill_hints" {
+        return;
+    }
+    let record_path = out_dir.join("prefill_attention.json");
+    let Ok(text) = fs::read_to_string(&record_path) else {
+        println!("  prefill_hints: no prefill_attention record yet; tuning LPT knobs too");
+        return;
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let any_lpt = record["entries"]
+        .as_array()
+        .map(|entries| {
+            entries.iter().any(|e| {
+                e["config"]["params"]["GROUT_FMHA_PREFILL_GQA_LPT"].as_i64() == Some(1)
+            })
+        })
+        .unwrap_or(true);
+    if any_lpt {
+        return;
+    }
+    let incumbent = incumbents(arch, "prefill_hints")
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    for (key, values) in site.axes.iter_mut() {
+        if key.contains("_LPT_") {
+            let keep = incumbent
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| *v)
+                .unwrap_or(values[0]);
+            *values = vec![keep];
+        }
+    }
+    println!(
+        "  prefill_hints: record runs the mapped kernel everywhere; LPT-only axes fixed at incumbents"
+    );
+}
+
 fn cartesian(axes: &[(&'static str, Vec<i64>)]) -> Vec<Config> {
     let mut configs: Vec<Vec<(&'static str, i64)>> = vec![vec![]];
     for (name, values) in axes {
@@ -274,6 +372,9 @@ fn apply_config(config: &Config) {
         unsafe {
             match value {
                 ParamValue::Int(0) => std::env::remove_var(key),
+                // Negative = an explicit "0" for boolean knobs whose unset
+                // default is true (0 itself means "unset" in this space).
+                ParamValue::Int(v) if *v < 0 => std::env::set_var(key, "0"),
                 ParamValue::Int(v) => std::env::set_var(key, v.to_string()),
                 ParamValue::Str(s) => std::env::set_var(key, s),
             }
@@ -478,10 +579,18 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    for site in sites(args.max_seq_len) {
+    // Engines constructed below load records from this directory, so a
+    // site tuned later in the run (prefill_hints) sees the winners saved by
+    // an earlier one (prefill_attention).
+    if std::env::var("GROUT_TUNING_RECORD_DIR").is_err() {
+        // SAFETY: single-threaded, before any engine exists.
+        unsafe { std::env::set_var("GROUT_TUNING_RECORD_DIR", &args.out_dir) };
+    }
+    for mut site in sites(args.max_seq_len) {
         if args.site != "all" && args.site != site.name {
             continue;
         }
+        restrict_lpt_hints(&mut site, &arch, &out_dir);
         verify_coverage(&arch, &site)?;
         let configs = cartesian(&site.axes);
         println!(
@@ -577,6 +686,10 @@ fn main() -> Result<()> {
         let record_path = out_dir.join(format!("{}.json", site.name));
         record.save(&record_path)?;
         println!("saved {}", record_path.display());
+        // Records are read at engine construction; drop the engine so the
+        // next site runs on top of the winners just saved.
+        engine_slot = None;
+        grout::model::device_synchronize();
     }
     Ok(())
 }

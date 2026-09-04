@@ -12,7 +12,7 @@ Directory layout is sibling-relative to the grout checkout:
 ```
 dev/
 ├── grout/            # branch safe-kernels
-├── cutile-rs/        # tag v0.3.0 (REQUIRED; the evaluated branch merged at this release)
+├── cutile-rs/        # optional: only needed to build against an unreleased cutile-rs rev
 ├── hf_models/qwen3_4b/           # HF snapshot (config + safetensors + tokenizer)
 ├── bench_envs/                   # only for baseline arms
 │   ├── vllm_env/                 # python venv with vllm
@@ -21,10 +21,12 @@ dev/
 └── llama.cpp/                    # optional; disabled by default
 ```
 
-`Cargo.toml`'s `[patch.crates-io]` points at `../cutile-rs` — the build
-fails without that checkout on the right branch. The safe kernels depend
-on that branch's mapped-partition API and JIT fixes; a crates.io release
-does not have them yet.
+Grout depends on the crates.io release of cutile-rs (0.3.1; see
+`Cargo.toml`) — no sibling checkout is required to build. To validate an
+unreleased cutile-rs revision, add a `[patch.crates-io]` section pointing
+the five crates (cuda-bindings, cuda-core, cuda-async, cutile-compiler,
+cutile) at a local checkout; `src/driver_compat.rs` keeps the source
+building against both the 0.3.0 and 0.3.1 driver-wrapper signatures.
 
 ## 1. Build + correctness smoke
 

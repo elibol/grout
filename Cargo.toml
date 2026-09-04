@@ -20,26 +20,12 @@ tokenizers = "0.20.4"
 
 cudarc = { version = "0.19.2", default-features = false, features = ["std", "cublas", "dynamic-loading", "cuda-13010"] }
 
-cuda-bindings = "0.3.0"
-cuda-core = "0.3.0"
-cuda-async = "0.3.0"
-cutile-compiler = "0.3.0"
-cutile = { version = "0.3.0", features = ["experimental-tune"] }
+cuda-bindings = "0.3.1"
+cuda-core = "0.3.1"
+cuda-async = "0.3.1"
+cutile-compiler = "0.3.1"
+cutile = { version = "0.3.1", features = ["experimental-tune"] }
 
-# VALIDATION BRANCH: cutile-rs 0.3.1 line. Validated first against main @
-# 447e906cb24d08fe8ccf13ed8dc9874ddc5d7c76 (PR #258), then against the local
-# ../cutile-rs checkout at 53ff737 (branch perf/launch-hot-path, which
-# includes the v0.3.1 release 9f68be2). The "0.3.0" requirements below accept
-# 0.3.1 under semver, so the crates.io patch applies. Git-dependency spelling:
-#   { git = "https://github.com/NVlabs/cutile-rs", rev = "447e906cb24d08fe8ccf13ed8dc9874ddc5d7c76" }
-# Baseline (safe-kernels branch) points at the ../cutile-rs-v0.3.0 worktree;
-# src/driver_compat.rs lets this same source build against either revision.
-[patch.crates-io]
-cuda-bindings = { path = "../cutile-rs/cuda-bindings" }
-cuda-core = { path = "../cutile-rs/cuda-core" }
-cuda-async = { path = "../cutile-rs/cuda-async" }
-cutile-compiler = { path = "../cutile-rs/cutile-compiler" }
-cutile = { path = "../cutile-rs/cutile" }
 
 [features]
 benchmarks = []
