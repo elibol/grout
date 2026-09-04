@@ -177,6 +177,15 @@ const ATTN_BN_PREFILL: usize = 32;
 const FMHA_PREFILL_LATENCY_DEFAULT: usize = 2;
 const FMHA_PREFILL_OCCUPANCY_DEFAULT: usize = 2;
 
+/// An env override counts only when it carries a value: `GROUT_X=` (empty,
+/// as a sweep script produces for an unset table entry) must fall through to
+/// the tuning record, not silently bypass it.
+fn env_is_set(var: &str) -> bool {
+    std::env::var(var)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
 fn env_usize_or(var: &str, default: usize) -> usize {
     std::env::var(var)
         .ok()
@@ -1665,7 +1674,7 @@ impl Qwen3Engine {
     /// Tunable knob resolution: explicit env var > verified tuning record
     /// (bucketed by q_len) > built-in default.
     fn tuned_usize(&self, key: &str, q_len: usize, default: usize) -> usize {
-        if std::env::var(key).is_ok() {
+        if env_is_set(key) {
             return env_usize_or(key, default);
         }
         self.tuned
@@ -1678,7 +1687,7 @@ impl Qwen3Engine {
     /// tuner's "0 = unset" rule): a positive value is `true`, a negative
     /// value is an explicit `false`, and 0 falls through to the default.
     fn tuned_bool(&self, key: &str, q_len: usize, default: bool) -> bool {
-        if std::env::var(key).is_ok() {
+        if env_is_set(key) {
             return env_bool_or(key, default);
         }
         match self.tuned.get(key, q_len) {
@@ -1689,7 +1698,7 @@ impl Qwen3Engine {
 
     /// Same precedence for optional hints (None = compiler default).
     fn tuned_hint(&self, key: &str, q_len: usize) -> Option<usize> {
-        if std::env::var(key).is_ok() {
+        if env_is_set(key) {
             return env_warps(key);
         }
         self.tuned.get(key, q_len).map(|v| v as usize)
@@ -1698,7 +1707,7 @@ impl Qwen3Engine {
     /// Occupancy-style hint: unset env falls to the record, then to the
     /// built-in default (mirrors env_usize_hint_or semantics).
     fn tuned_occupancy(&self, key: &str, q_len: usize, default: usize) -> Option<usize> {
-        if std::env::var(key).is_ok() {
+        if env_is_set(key) {
             return env_usize_hint_or(key, default);
         }
         self.tuned

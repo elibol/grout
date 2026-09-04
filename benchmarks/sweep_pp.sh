@@ -237,25 +237,45 @@ if [[ -f "$GROUT_DIR/Cargo.toml" ]]; then
         RUN_MAX_SEQ_LEN="$(grout_max_seq_len_for "$PP" "$TG_FIXED")"
         RUN_BENCH_REPS="$(bench_reps_for_pp "$PP")"
         echo ""
-        echo "--- grout pp=${PP} tg=${TG_FIXED}  (reps=$RUN_BENCH_REPS BM=$RUN_PREFILL_BM BN_PRE=$RUN_PREFILL_BN BN_DEC=$RUN_DEC_BN NKS=$RUN_DEC_NKS max_seq=$RUN_MAX_SEQ_LEN GQA=$RUN_FMHA_PREFILL_GQA LPT=$RUN_FMHA_PREFILL_GQA_LPT GROUP=$RUN_FMHA_PREFILL_GQA_GROUP SW=$RUN_FMHA_PREFILL_LPT_SWIZZLE SCHED=$RUN_FMHA_PREFILL_LPT_SCHED MASK_SPLIT=$RUN_FMHA_PREFILL_LPT_MASK_SPLIT) ---"
+        if [[ "${GROUT_TUNING_PROFILE:-default}" == "records" ]]; then
+            echo "--- grout pp=${PP} tg=${TG_FIXED}  (reps=$RUN_BENCH_REPS max_seq=$RUN_MAX_SEQ_LEN BN_DEC=$RUN_DEC_BN NKS=$RUN_DEC_NKS; profile=records: prefill knobs from benchmarks/tuning/<arch> records, no env exported for them) ---"
+        else
+            echo "--- grout pp=${PP} tg=${TG_FIXED}  (reps=$RUN_BENCH_REPS BM=$RUN_PREFILL_BM BN_PRE=$RUN_PREFILL_BN BN_DEC=$RUN_DEC_BN NKS=$RUN_DEC_NKS max_seq=$RUN_MAX_SEQ_LEN GQA=$RUN_FMHA_PREFILL_GQA LPT=$RUN_FMHA_PREFILL_GQA_LPT GROUP=$RUN_FMHA_PREFILL_GQA_GROUP SW=$RUN_FMHA_PREFILL_LPT_SWIZZLE SCHED=$RUN_FMHA_PREFILL_LPT_SCHED MASK_SPLIT=$RUN_FMHA_PREFILL_LPT_MASK_SPLIT) ---"
+        fi
+        # GROUT_TUNING_PROFILE=records: every prefill-attention / hint knob
+        # is left to the engine, which resolves env > tuning record
+        # (benchmarks/tuning/<arch>) > built-in default. The legacy per-pp
+        # table above is NOT exported for those knobs in this mode — env
+        # beats records, so exporting it silently benches the hand profile
+        # instead of the tuned one (this is exactly what happened to every
+        # sweep before 2026-09-04). Decode tile knobs are still exported:
+        # no decode records ship yet, and the wrappers carry the per-arch
+        # decode profile through the same per-pp variables.
+        GROUT_RUN_ENV=(
+            GROUT_ATTN_BN_DECODE=$RUN_DEC_BN
+            GROUT_FMHA_NUM_KV_SPLITS=$RUN_DEC_NKS
+        )
+        if [[ "${GROUT_TUNING_PROFILE:-default}" != "records" ]]; then
+            GROUT_RUN_ENV+=(
+                GROUT_ATTN_BM_PREFILL=$RUN_PREFILL_BM
+                GROUT_ATTN_BN_PREFILL=$RUN_PREFILL_BN
+                GROUT_FMHA_PREFILL=$RUN_FMHA_PREFILL
+                GROUT_FMHA_PREFILL_GQA=$RUN_FMHA_PREFILL_GQA
+                GROUT_FMHA_PREFILL_GQA_LPT=$RUN_FMHA_PREFILL_GQA_LPT
+                GROUT_FMHA_PREFILL_GQA_GROUP=$RUN_FMHA_PREFILL_GQA_GROUP
+                GROUT_FMHA_PREFILL_LPT_SWIZZLE=$RUN_FMHA_PREFILL_LPT_SWIZZLE
+                GROUT_FMHA_PREFILL_LPT_SCHED=$RUN_FMHA_PREFILL_LPT_SCHED
+                GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=$RUN_FMHA_PREFILL_LPT_MASK_SPLIT
+                GROUT_FMHA_PREFILL_LATENCY=$RUN_FMHA_PREFILL_LATENCY
+                GROUT_FMHA_PREFILL_OCCUPANCY=$RUN_FMHA_PREFILL_OCCUPANCY
+                GROUT_FUSED_QK_ROPE_KV_PREFILL=$RUN_FUSED_QK_ROPE_KV_PREFILL
+                GROUT_RMS_BLOCK=$RUN_RMS_BLOCK
+                GROUT_ADD_RMS_BLOCK=$RUN_ADD_RMS_BLOCK
+                GROUT_RMS_HIDDEN_BLOCK=$RUN_RMS_HIDDEN_BLOCK
+            )
+        fi
         (cd "$GROUT_DIR" && \
-            GROUT_ATTN_BM_PREFILL=$RUN_PREFILL_BM \
-            GROUT_ATTN_BN_PREFILL=$RUN_PREFILL_BN \
-            GROUT_ATTN_BN_DECODE=$RUN_DEC_BN \
-            GROUT_FMHA_NUM_KV_SPLITS=$RUN_DEC_NKS \
-            GROUT_FMHA_PREFILL=$RUN_FMHA_PREFILL \
-            GROUT_FMHA_PREFILL_GQA=$RUN_FMHA_PREFILL_GQA \
-            GROUT_FMHA_PREFILL_GQA_LPT=$RUN_FMHA_PREFILL_GQA_LPT \
-            GROUT_FMHA_PREFILL_GQA_GROUP=$RUN_FMHA_PREFILL_GQA_GROUP \
-            GROUT_FMHA_PREFILL_LPT_SWIZZLE=$RUN_FMHA_PREFILL_LPT_SWIZZLE \
-            GROUT_FMHA_PREFILL_LPT_SCHED=$RUN_FMHA_PREFILL_LPT_SCHED \
-            GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=$RUN_FMHA_PREFILL_LPT_MASK_SPLIT \
-            GROUT_FMHA_PREFILL_LATENCY=$RUN_FMHA_PREFILL_LATENCY \
-            GROUT_FMHA_PREFILL_OCCUPANCY=$RUN_FMHA_PREFILL_OCCUPANCY \
-            GROUT_FUSED_QK_ROPE_KV_PREFILL=$RUN_FUSED_QK_ROPE_KV_PREFILL \
-            GROUT_RMS_BLOCK=$RUN_RMS_BLOCK \
-            GROUT_ADD_RMS_BLOCK=$RUN_ADD_RMS_BLOCK \
-            GROUT_RMS_HIDDEN_BLOCK=$RUN_RMS_HIDDEN_BLOCK \
+            env "${GROUT_RUN_ENV[@]}" \
             ./target/release/grout_bench \
             --model "$MODEL_HF" \
             --prompt-file "$PROMPTS_DIR/pp_${PP}.txt" \
