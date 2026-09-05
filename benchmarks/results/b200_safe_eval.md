@@ -1645,3 +1645,86 @@ are means over all nine measurements for each arm.
 | pp=512 prefill | 30.12 / 30.89 / 29.87 | 34.72 / 34.30 / 34.72 | 30.34 / 29.60 / 31.08 | 30.30 / 34.58 / 30.34 | -0.15% | **PASS** |
 | pp=2048 prefill | 121.00 / 115.89 / 118.14 | 120.93 / 119.33 / 122.06 | 118.32 / 118.01 / 119.48 | 118.34 / 120.78 / 118.61 | -0.22% | **PASS** |
 | pp=8192 prefill | 511.64 / 514.50 / 513.37 | 544.51 / 541.84 / 541.19 | 517.32 / 516.59 / 517.18 | 513.17 / 542.51 / 517.03 | -0.75% | **PASS** |
+
+## sm_100 CGA cliff check and expanded-site retune
+
+Date: 2026-09-05
+
+- grout checkout: `58e5cf9` (`safe-kernels`) for the measurements
+- cutile-rs: crates.io `0.3.1` (no sibling checkout)
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B
+- prompt source: `benchmarks/results/sweep/20260822_132652/prompts`
+
+The release build and one-request smoke passed. The smoke printed `Loaded model
+from ../hf_models/qwen3_32b` and no `tuning record ... refused` line.
+
+### CGA cliff check
+
+Each arm invocation used the exact raw prompt, zero generated tokens,
+`--ignore-eos --quiet --max-seq-len 16384`, one discarded warmup, and three
+measurements. The three rounds used default/CGA=2/CGA=4,
+CGA=4/CGA=2/default, then default/CGA=2/CGA=4 order. Values below are
+per-round and overall means.
+
+| pp | arm | round means (ms) | overall (ms) | vs default | ratio |
+|---:|---|---:|---:|---:|---:|
+| 2048 | records default | 116.353 / 118.945 / 117.114 | 117.471 | — | 1.000x |
+| 2048 | CGA=2 | 120.405 / 116.421 / 120.435 | 119.087 | +1.38% | 1.014x |
+| 2048 | CGA=4 | 166.321 / 154.614 / 155.268 | 158.734 | +35.13% | 1.351x |
+| 8192 | records default | 500.772 / 505.296 / 503.083 | 503.050 | — | 1.000x |
+| 8192 | CGA=2 | 547.330 / 549.587 / 551.292 | 549.403 | +9.21% | 1.092x |
+| 8192 | CGA=4 | 1248.945 / 1248.882 / 1248.260 | 1248.696 | +148.22% | 2.482x |
+
+CGA=2 stayed far below the 1.5x stop threshold at both sizes, so tuning
+continued. The 36-token greedy pp=2048 continuation was byte-identical across
+default, CGA=2, and CGA=4 (142 characters in each extracted output).
+
+### CGA-expanded retune
+
+Both sites printed `coverage ok`. `prefill_hints` printed the expected
+`base LPT: 576 of 576 ... live` banner at pp=512 and
+`base causal-mapped: 12 of 576 ... live` at pp=2048 and pp=8192. Its new
+base-tagged pp=512 log did not import the 192 legacy untagged trials, so it
+remeasured all 576 live candidates rather than only the two new CGA arms. One
+leak-induced allocation failure exited code 3; the wrapper resumed from 444
+completed trials and finished cleanly after two processes. The long buckets
+measured all 12 live candidates.
+
+`wide_prefill` resumed 12 prior trials per bucket and measured the 24 new CGA
+candidates, completing 36/36 at each size in one process. No bucket at either
+site selected CGA=2 or CGA=4.
+
+| site / bucket | selected configuration | measured live candidates | tuner median (ms) | CGA moved? |
+|---|---|---:|---:|---|
+| prefill hints, pp=512 | group=8, latency=1, mask split=off, sched=1, swizzle=0 | 576 / 576 | 31.34 | no |
+| prefill hints, pp=2048 | group=0, latency=1, mask split=off, sched=1, swizzle=8 | 12 / 12 | 113.24 | no |
+| prefill hints, pp=8192 | group=0, latency=2, mask split=off, sched=1, swizzle=8 | 12 / 12 | 503.94 | no |
+| wide prefill, pp=2048 | BM=16, warps=2 | 36 / 36 | 113.23 | no |
+| wide prefill, pp=8192 | BM=32, warps=1 | 36 / 36 | 501.23 | no |
+
+The hints winners changed and therefore proceeded to the parity gate. The
+wide-prefill winners did not change, so its regenerated record metadata was
+not retained.
+
+### Three-arm paired prefill parity gate
+
+Each arm invocation loaded Qwen3-32B, used the exact raw prompt with zero
+generated tokens, ran one discarded warmup, and recorded three measurements.
+The three rounds used records/built-ins/shipping,
+shipping/built-ins/records, then records/built-ins/shipping order. Built-ins
+set `GROUT_TUNING_RECORD_DIR=/nonexistent`; shipping also disabled records and
+used the cell values from `sweep_pp_sm100.sh`. Values are per-round means of
+three measurements; overall values are means over all nine measurements per
+arm.
+
+| cell / metric | records rounds (ms) | built-ins rounds (ms) | shipping rounds (ms) | overall records / built-ins / shipping (ms) | records vs shipping | gate |
+|---|---:|---:|---:|---:|---:|---|
+| pp=512 prefill | 28.697 / 28.833 / 28.353 | 32.900 / 33.058 / 33.593 | 28.994 / 28.643 / 29.613 | 28.628 / 33.184 / 29.083 | -1.57% | **PASS** |
+| pp=2048 prefill | 112.543 / 112.007 / 115.650 | 115.847 / 118.707 / 118.736 | 114.803 / 115.657 / 116.340 | 113.400 / 117.764 / 115.600 | -1.90% | **PASS** |
+| pp=8192 prefill | 506.002 / 506.457 / 503.762 | 528.385 / 533.696 / 533.088 | 505.465 / 503.563 / 506.257 | 505.407 / 531.723 / 505.095 | +0.06% | **PASS** |
+
+All three cells pass the records-within-shipping-+2% criterion. The changed
+`prefill_hints` record is eligible to ship. The unconditional follow-up
+records-mode sweep is preserved separately at
+`benchmarks/results/sweep/20260905_013901`; the earlier
+`benchmarks/results/sweep/20260904_173429` bundle remains unchanged.

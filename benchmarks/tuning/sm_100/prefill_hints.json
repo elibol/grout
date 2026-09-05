@@ -5,56 +5,56 @@
   "cutile_version": "0.3.1",
   "tileiras_fingerprint": "tileiras: NVIDIA (R) Cuda Tile IR optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Fri_May__1_20:03:54_PDT_2026\nCuda compilation tools, release 13.3, V13.3.36\nBuild local.local.37905922_",
   "arch": "sm_100",
-  "machine": "umb-b200-041",
-  "created_unix_secs": 1788566041,
-  "space_hash": "06fe33edb264ea3d",
+  "machine": "umbriel-b200-020",
+  "created_unix_secs": 1788595027,
+  "space_hash": "5840a1dd3c013a8d",
   "gate": "step-success-v1",
   "entries": [
     {
       "bucket": "pp=512",
       "config": {
-        "id": "GROUT_FMHA_PREFILL_GQA_GROUP=0,GROUT_FMHA_PREFILL_LATENCY=1,GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=-1,GROUT_FMHA_PREFILL_LPT_SCHED=1,GROUT_FMHA_PREFILL_LPT_SWIZZLE=0",
+        "id": "GROUT_FMHA_PREFILL_GQA_GROUP=8,GROUT_FMHA_PREFILL_LATENCY=1,GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=-1,GROUT_FMHA_PREFILL_LPT_SCHED=1,GROUT_FMHA_PREFILL_LPT_SWIZZLE=0",
         "params": {
-          "GROUT_FMHA_PREFILL_GQA_GROUP": 0,
+          "GROUT_FMHA_PREFILL_GQA_GROUP": 8,
           "GROUT_FMHA_PREFILL_LATENCY": 1,
           "GROUT_FMHA_PREFILL_LPT_MASK_SPLIT": -1,
           "GROUT_FMHA_PREFILL_LPT_SCHED": 1,
           "GROUT_FMHA_PREFILL_LPT_SWIZZLE": 0
         }
       },
-      "median_ms": 31.901743,
+      "median_ms": 31.342651,
       "samples": 3,
       "l2_key": null
     },
     {
       "bucket": "pp=2048",
       "config": {
-        "id": "GROUT_FMHA_PREFILL_GQA_GROUP=8,GROUT_FMHA_PREFILL_LATENCY=1,GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=-1,GROUT_FMHA_PREFILL_LPT_SCHED=1,GROUT_FMHA_PREFILL_LPT_SWIZZLE=8",
+        "id": "GROUT_FMHA_PREFILL_GQA_GROUP=0,GROUT_FMHA_PREFILL_LATENCY=1,GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=-1,GROUT_FMHA_PREFILL_LPT_SCHED=1,GROUT_FMHA_PREFILL_LPT_SWIZZLE=8",
         "params": {
-          "GROUT_FMHA_PREFILL_GQA_GROUP": 8,
+          "GROUT_FMHA_PREFILL_GQA_GROUP": 0,
           "GROUT_FMHA_PREFILL_LATENCY": 1,
           "GROUT_FMHA_PREFILL_LPT_MASK_SPLIT": -1,
           "GROUT_FMHA_PREFILL_LPT_SCHED": 1,
           "GROUT_FMHA_PREFILL_LPT_SWIZZLE": 8
         }
       },
-      "median_ms": 112.95784,
+      "median_ms": 113.23789,
       "samples": 3,
       "l2_key": null
     },
     {
       "bucket": "pp=8192",
       "config": {
-        "id": "GROUT_FMHA_PREFILL_GQA_GROUP=0,GROUT_FMHA_PREFILL_LATENCY=1,GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=1,GROUT_FMHA_PREFILL_LPT_SCHED=3,GROUT_FMHA_PREFILL_LPT_SWIZZLE=8",
+        "id": "GROUT_FMHA_PREFILL_GQA_GROUP=0,GROUT_FMHA_PREFILL_LATENCY=2,GROUT_FMHA_PREFILL_LPT_MASK_SPLIT=-1,GROUT_FMHA_PREFILL_LPT_SCHED=1,GROUT_FMHA_PREFILL_LPT_SWIZZLE=8",
         "params": {
           "GROUT_FMHA_PREFILL_GQA_GROUP": 0,
-          "GROUT_FMHA_PREFILL_LATENCY": 1,
-          "GROUT_FMHA_PREFILL_LPT_MASK_SPLIT": 1,
-          "GROUT_FMHA_PREFILL_LPT_SCHED": 3,
+          "GROUT_FMHA_PREFILL_LATENCY": 2,
+          "GROUT_FMHA_PREFILL_LPT_MASK_SPLIT": -1,
+          "GROUT_FMHA_PREFILL_LPT_SCHED": 1,
           "GROUT_FMHA_PREFILL_LPT_SWIZZLE": 8
         }
       },
-      "median_ms": 502.85565,
+      "median_ms": 503.94226,
       "samples": 3,
       "l2_key": null
     }
