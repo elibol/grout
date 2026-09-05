@@ -430,19 +430,28 @@ fn env_warps(var: &str) -> Option<usize> {
         .filter(|v| *v > 0)
 }
 
-fn compile_options_with_occupancy(occupancy: Option<usize>) -> CompileOptions {
-    compile_options_with(occupancy, None)
-}
-
-/// CompileOptions from optional occupancy and worker-warps-per-CTA hints
-/// (cutile-rs 0.3.0 adds the warps knob). None leaves the compiler default.
-fn compile_options_with(occupancy: Option<usize>, warps: Option<usize>) -> CompileOptions {
+/// CompileOptions from optional occupancy, worker-warps-per-CTA and
+/// thread-block-cluster (`num_cta_in_cga`) hints; None leaves the compiler
+/// default (cutile-rs 0.3.0 added the warps knob). Runtime
+/// compile options override the kernel's entry-level hints, so this is a
+/// tunable like occupancy and warps — it never touches kernel source (and
+/// therefore never invalidates tuning records). Adjacent attention CTAs
+/// share K/V tiles (neighboring Q blocks of one head, or the Q heads of
+/// one KV head), which is what cluster multicast exists for.
+fn compile_options_with_cga(
+    occupancy: Option<usize>,
+    warps: Option<usize>,
+    cga: Option<usize>,
+) -> CompileOptions {
     let mut opts = CompileOptions::default();
     if let Some(occupancy) = occupancy {
         opts = opts.occupancy(occupancy as i32);
     }
     if let Some(warps) = warps {
         opts = opts.num_worker_warps_per_cta(warps as i32);
+    }
+    if let Some(cga) = cga {
+        opts = opts.num_cta_in_cga(cga as i32);
     }
     opts
 }
@@ -3099,9 +3108,10 @@ impl Qwen3Engine {
                             "1".to_string(),
                             "1".to_string(),
                         ])
-                        .compile_options(compile_options_with(
+                        .compile_options(compile_options_with_cga(
                             fmha_decode_occupancy,
                             self.tuned_hint("GROUT_FMHA_DECODE_WARPS", self.max_seq_len),
+                            self.tuned_hint("GROUT_FMHA_DECODE_CGA", self.max_seq_len),
                         ))
                         .sync_on(stream)
                         .map_err(|e| anyhow::anyhow!("prime fmha_split failed: {e:?}"))?;
@@ -3665,9 +3675,10 @@ impl Qwen3Engine {
                                 "1".to_string(),
                                 "1".to_string(),
                             ])
-                            .compile_options(compile_options_with(
+                            .compile_options(compile_options_with_cga(
                                 fmha_decode_occupancy,
                                 self.tuned_hint("GROUT_FMHA_DECODE_WARPS", self.max_seq_len),
+                                self.tuned_hint("GROUT_FMHA_DECODE_CGA", self.max_seq_len),
                             )),
                         )?;
                         let merge_ntb = (kv_heads * (head_dim / fmha_merge_chunk_d)) as u32;
@@ -4792,9 +4803,10 @@ impl Qwen3Engine {
                     bm.to_string(),
                 ])
                 .grid(((bulk_rows / bm) as u32, attn_heads as u32, 1u32))
-                .compile_options(compile_options_with(
+                .compile_options(compile_options_with_cga(
                     None,
                     self.tuned_hint("GROUT_QK_PREFILL_WARPS", seq_len),
+                    self.tuned_hint("GROUT_QK_PREFILL_CGA", seq_len),
                 ))
                 .execute(ctx)?;
             }
@@ -4850,9 +4862,10 @@ impl Qwen3Engine {
                     bm.to_string(),
                 ])
                 .grid(((kv_bulk / bm) as u32, kv_heads as u32, 1u32))
-                .compile_options(compile_options_with(
+                .compile_options(compile_options_with_cga(
                     None,
                     self.tuned_hint("GROUT_QK_PREFILL_WARPS", seq_len),
+                    self.tuned_hint("GROUT_QK_PREFILL_CGA", seq_len),
                 ))
                 .execute(ctx)?;
             }
@@ -6101,9 +6114,10 @@ impl Qwen3Engine {
                             )
                             .generics(generics)
                             .grid((grid_x, 1u32, 1u32))
-                            .compile_options(compile_options_with(
+                            .compile_options(compile_options_with_cga(
                                 prefill_occupancy,
                                 self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_CGA", q_len),
                             ))
                             .execute(ctx)?;
                         }
@@ -6127,9 +6141,10 @@ impl Qwen3Engine {
                             )
                             .generics(generics)
                             .grid((grid_x, 1u32, 1u32))
-                            .compile_options(compile_options_with(
+                            .compile_options(compile_options_with_cga(
                                 prefill_occupancy,
                                 self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_CGA", q_len),
                             ))
                             .execute(ctx)?;
                         }
@@ -6193,9 +6208,10 @@ impl Qwen3Engine {
                             "1".to_string(),
                             "1".to_string(),
                         ])
-                        .compile_options(compile_options_with(
+                        .compile_options(compile_options_with_cga(
                                 prefill_occupancy,
                                 self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_CGA", q_len),
                             ))
                         .execute(ctx)?
                     };
@@ -6241,9 +6257,10 @@ impl Qwen3Engine {
                             "1".to_string(),
                             "1".to_string(),
                         ])
-                        .compile_options(compile_options_with(
+                        .compile_options(compile_options_with_cga(
                                 prefill_occupancy,
                                 self.tuned_hint("GROUT_FMHA_PREFILL_WARPS", q_len),
+                                self.tuned_hint("GROUT_FMHA_PREFILL_CGA", q_len),
                             ))
                         .execute(ctx)?
                     };

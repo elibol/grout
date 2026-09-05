@@ -122,6 +122,20 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
         max_new_tokens: 16,
         decode_objective: false,
     };
+    // Thread-block-cluster axis (num_cta_in_cga), opt-in via
+    // GROUT_TUNE_CGA_AXIS=1. On sm_120 (RTX 5090) clusters on the attention
+    // kernels are a cliff, not a knob: paired screen 2026-09-04, CGA=2 ran
+    // 4.7x slower at pp=2048 and 11.5x at pp=8192, CGA=4 8x/22x — every
+    // cluster candidate would cost ~10x the tuning time to confirm what the
+    // screen already showed. Untested on sm_100, where clusters are native
+    // and the K/V multicast argument actually applies: screen one config
+    // there first (`--require ...,GROUT_FMHA_PREFILL_CGA=2`) before turning
+    // the axis on.
+    let cga_axis: Vec<i64> = if std::env::var("GROUT_TUNE_CGA_AXIS").is_ok_and(|v| v == "1") {
+        vec![0, 2, 4]
+    } else {
+        vec![0]
+    };
     vec![
         Site {
             name: "prefill_attention",
@@ -179,6 +193,10 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 ("GROUT_FMHA_PREFILL_LPT_SWIZZLE", vec![0, 8]),
                 // Boolean: -1 = explicit off (see apply_config), 1 = on.
                 ("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", vec![-1, 1]),
+                // Thread-block cluster size (num_cta_in_cga): adjacent CTAs
+                // share K/V tiles, so cluster multicast can cut L2 traffic.
+                // Live for every dispatch; 0 = compiler default (elided).
+                ("GROUT_FMHA_PREFILL_CGA", cga_axis.clone()),
             ],
             buckets: [512usize, 2048, 8192]
                 .into_iter()
@@ -192,6 +210,7 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 ("GROUT_ATTN_BN_DECODE", vec![16, 32, 64, 128]),
                 ("GROUT_FMHA_NUM_KV_SPLITS", vec![4, 8, 16, 32]),
                 ("GROUT_FMHA_DECODE_WARPS", vec![0, 2, 4, 8]),
+                ("GROUT_FMHA_DECODE_CGA", cga_axis.clone()),
             ],
             // Canonical decode cells use a short prompt; tuning in a long
             // kv context (the first attempt used pp=512) skews winners.
@@ -215,6 +234,7 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
             axes: vec![
                 ("GROUT_QK_PREFILL_BM", vec![16, 32, 64]),
                 ("GROUT_QK_PREFILL_WARPS", vec![0, 1, 2, 4]),
+                ("GROUT_QK_PREFILL_CGA", cga_axis.clone()),
             ],
             buckets: [2048usize, 8192]
                 .into_iter()
@@ -268,6 +288,7 @@ fn incumbents(arch: &str, site: &str) -> Vec<Vec<(&'static str, i64)>> {
                 ("GROUT_FMHA_PREFILL_LPT_SCHED", 1),
                 ("GROUT_FMHA_PREFILL_LPT_SWIZZLE", 8),
                 ("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", -1),
+                ("GROUT_FMHA_PREFILL_CGA", 0),
             ],
         ],
         (_, "prefill_hints") => vec![
@@ -278,6 +299,7 @@ fn incumbents(arch: &str, site: &str) -> Vec<Vec<(&'static str, i64)>> {
                 ("GROUT_FMHA_PREFILL_LPT_SCHED", 1),
                 ("GROUT_FMHA_PREFILL_LPT_SWIZZLE", 0),
                 ("GROUT_FMHA_PREFILL_LPT_MASK_SPLIT", 1),
+                ("GROUT_FMHA_PREFILL_CGA", 0),
             ],
         ],
         (_, "decode_attention") if arch.starts_with("sm_100") => vec![
@@ -286,16 +308,19 @@ fn incumbents(arch: &str, site: &str) -> Vec<Vec<(&'static str, i64)>> {
                 ("GROUT_ATTN_BN_DECODE", 32),
                 ("GROUT_FMHA_NUM_KV_SPLITS", 4),
                 ("GROUT_FMHA_DECODE_WARPS", 0),
+                ("GROUT_FMHA_DECODE_CGA", 0),
             ],
         ],
         (_, "decode_attention") => vec![vec![
             ("GROUT_ATTN_BN_DECODE", 32),
             ("GROUT_FMHA_NUM_KV_SPLITS", 16),
             ("GROUT_FMHA_DECODE_WARPS", 0),
+            ("GROUT_FMHA_DECODE_CGA", 0),
         ]],
         (_, "wide_prefill") => vec![vec![
             ("GROUT_QK_PREFILL_BM", 32),
             ("GROUT_QK_PREFILL_WARPS", 0),
+            ("GROUT_QK_PREFILL_CGA", 0),
         ]],
         _ => vec![],
     }
@@ -455,7 +480,12 @@ fn config_distance(c: &Config, reference: &BTreeMap<String, i64>) -> usize {
 /// Axes added after trial logs already existed: a zero (= unset) value is
 /// omitted from the config instead of recorded as `KEY=0`, so config ids of
 /// the pre-existing grid are unchanged and resume keeps every prior trial.
-const ELIDE_ZERO_AXES: &[&str] = &["GROUT_FMHA_PREFILL_GQA"];
+const ELIDE_ZERO_AXES: &[&str] = &[
+    "GROUT_FMHA_PREFILL_GQA",
+    "GROUT_FMHA_PREFILL_CGA",
+    "GROUT_FMHA_DECODE_CGA",
+    "GROUT_QK_PREFILL_CGA",
+];
 
 /// Candidates that cannot express anything the rest of the grid does not.
 fn prune(site: &str, params: &[(&'static str, i64)]) -> bool {
