@@ -1594,3 +1594,54 @@ are means over all nine measurements for each arm.
 | pp=512 prefill | 28.82 / 29.36 / 28.77 | 33.85 / 33.44 / 33.46 | 29.46 / 29.02 / 29.90 | 28.98 / 33.59 / 29.46 | -1.61% | **PASS** |
 | pp=2048 prefill | 115.60 / 113.21 / 112.43 | 113.68 / 114.21 / 116.28 | 115.58 / 117.29 / 116.44 | 113.75 / 114.72 / 116.44 | -2.31% | **PASS** |
 | pp=8192 prefill | 502.14 / 500.02 / 500.00 | 531.77 / 531.21 / 528.57 | 504.55 / 505.80 / 499.51 | 500.72 / 530.52 / 503.29 | -0.51% | **PASS** |
+
+## sm_100 exhaustive 8K completion and records-mode gate
+
+Date: 2026-09-04
+
+- grout checkout: `f8e7b18` (`safe-kernels`); deliberately not updated to
+  `000e242` before the records-mode sweep
+- cutile-rs: crates.io `0.3.1` (no sibling checkout)
+- GPU/model: NVIDIA B200 (`sm_100`), Qwen3-32B
+- prompt source: `benchmarks/results/sweep/20260822_132652/prompts`
+
+Status: **PASS — records are no slower than the shipping profile within the
++2% limit at all three required pure-prefill cells.** Both no-budget 8K
+resumes completed exhaustively and exited cleanly after one process, with no
+wrapper restart. The requested follow-up `--budget-min 1` runs then resumed
+every bucket as complete and re-saved the same records.
+
+### Completed prefill tuning coverage
+
+All startup coverage assertions passed. `prefill_hints` did not print
+`LPT-only axes fixed at incumbents` because the pp=512 attention winner uses
+the LPT kernel. Trial logs remain local and are not committed.
+
+| site / bucket | selected configuration | measured candidates | tuner median (ms) |
+|---|---|---:|---:|
+| prefill attention, pp=512 | LPT=1, BM=16, BN=64, occupancy=2, warps=4 | 256 / 256 | 32.06 |
+| prefill attention, pp=2048 | LPT=0, BM=16, BN=128, occupancy=2, warps=default | 256 / 256 | 114.36 |
+| prefill attention, pp=8192 | LPT=0, BM=16, BN=128, occupancy=2, warps=default | 256 / 256 | 506.19 |
+| prefill hints, pp=512 | group=0, latency=1, mask split=off, sched=1, swizzle=0 | 192 / 192 | 31.90 |
+| prefill hints, pp=2048 | group=8, latency=1, mask split=off, sched=1, swizzle=8 | 192 / 192 | 112.96 |
+| prefill hints, pp=8192 | group=0, latency=1, mask split=on, sched=3, swizzle=8 | 192 / 192 | 502.86 |
+| wide prefill, pp=2048 | BM=16, warps=2 | 12 / 12 | 113.23 |
+| wide prefill, pp=8192 | BM=32, warps=1 | 12 / 12 | 501.23 |
+
+### Three-arm paired prefill parity gate
+
+Each arm invocation loaded Qwen3-32B, used the exact raw prompt with zero
+generated tokens, ran one discarded warmup, and recorded three measurements.
+The three rounds used records/built-ins/shipping,
+shipping/built-ins/records, then records/built-ins/shipping order. Built-ins
+set `GROUT_TUNING_RECORD_DIR=/nonexistent`; shipping also disabled records and
+used the cell values from `sweep_pp_sm100.sh`.
+
+Values are per-round means of three pure-prefill measurements. Overall values
+are means over all nine measurements for each arm.
+
+| cell / metric | records rounds (ms) | built-ins rounds (ms) | shipping rounds (ms) | overall records / built-ins / shipping (ms) | records vs shipping | gate |
+|---|---:|---:|---:|---:|---:|---|
+| pp=512 prefill | 30.12 / 30.89 / 29.87 | 34.72 / 34.30 / 34.72 | 30.34 / 29.60 / 31.08 | 30.30 / 34.58 / 30.34 | -0.15% | **PASS** |
+| pp=2048 prefill | 121.00 / 115.89 / 118.14 | 120.93 / 119.33 / 122.06 | 118.32 / 118.01 / 119.48 | 118.34 / 120.78 / 118.61 | -0.22% | **PASS** |
+| pp=8192 prefill | 511.64 / 514.50 / 513.37 | 544.51 / 541.84 / 541.19 | 517.32 / 516.59 / 517.18 | 513.17 / 542.51 / 517.03 | -0.75% | **PASS** |
