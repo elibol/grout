@@ -1,0 +1,166 @@
+═══════════════════════════════════════════════════════════════
+ Prefill scan  (pp ∈ {18 128 512 2048 8192}, tg=36)
+ reps=10, reps_long_gt512=10, warmup=3, clock_lock=none
+ grout_tuning_profile=sm100_b200
+ 2026-09-06T11:14:24-0700
+═══════════════════════════════════════════════════════════════
+
+[1;36m==> Generating prompt files at exact token counts[0m
+  pp=18    actual_tokens=18    kind=chat-templated  path=/home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/prompts/pp_18.txt
+  pp=128   actual_tokens=128   kind=synthetic raw   path=/home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/prompts/pp_128.txt
+  pp=512   actual_tokens=512   kind=synthetic raw   path=/home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/prompts/pp_512.txt
+  pp=2048  actual_tokens=2048  kind=synthetic raw   path=/home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/prompts/pp_2048.txt
+  pp=8192  actual_tokens=8192  kind=synthetic raw   path=/home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/prompts/pp_8192.txt
+
+Wrote 5 prompt files to /home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/prompts/
+
+[1;36m==> Benchmark: grout[0m
+
+warning: `grout` (lib) generated 12 warnings
+    Finished `release` profile [optimized] target(s) in 2.62s
+
+--- grout pp=18 tg=36  (reps=10 BM=16 BN_PRE=128 BN_DEC=16 NKS=4 max_seq=4096 GQA=0 LPT=0 GROUP=0 SW=0 SCHED=1 MASK_SPLIT=0) ---
+<|im_start|>assistant
+<think>
+
+</think>
+
+
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=80.5, request_gen_tps=14.2, prompt_s=1.331
+  [warmup] run 1/3: prompt_tokens=18, gen_tokens=36, prefill_ms=15.82, decode_ms=446.89, e2e_ms=462.72, decode_phase_tps=80.6, request_gen_tps=77.8, e2e_tps=116.7
+  [warmup] run 2/3: prompt_tokens=18, gen_tokens=36, prefill_ms=15.78, decode_ms=446.92, e2e_ms=462.72, decode_phase_tps=80.6, request_gen_tps=77.8, e2e_tps=116.7
+  [warmup] run 3/3: prompt_tokens=18, gen_tokens=36, prefill_ms=15.79, decode_ms=447.03, e2e_ms=462.83, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+
+  [timed] run 1/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.78, decode_ms=447.05, e2e_ms=462.84, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 2/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.78, decode_ms=447.00, e2e_ms=462.79, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 3/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.77, decode_ms=446.97, e2e_ms=462.75, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 4/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.79, decode_ms=446.94, e2e_ms=462.74, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 5/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.77, decode_ms=447.01, e2e_ms=462.79, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 6/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.77, decode_ms=446.96, e2e_ms=462.74, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 7/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.78, decode_ms=446.93, e2e_ms=462.72, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 8/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.77, decode_ms=447.01, e2e_ms=462.79, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 9/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.79, decode_ms=447.03, e2e_ms=462.83, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [timed] run 10/10: prompt_tokens=18, gen_tokens=36, prefill_ms=15.78, decode_ms=446.97, e2e_ms=462.76, decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7
+  [grout] mean over 10 runs: decode_phase_tps=80.5, request_gen_tps=77.8, e2e_tps=116.7, elapsed=0.463s
+
+--- grout pp=128 tg=36  (reps=10 BM=64 BN_PRE=32 BN_DEC=32 NKS=16 max_seq=4096 GQA=0 LPT=0 GROUP=0 SW=0 SCHED=1 MASK_SPLIT=0) ---
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from ../hf_models/qwen3_32b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [547 chars]
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=81.1, request_gen_tps=12.8, prompt_s=1.599
+  [warmup] run 1/3: prompt_tokens=128, gen_tokens=36, prefill_ms=16.17, decode_ms=443.61, e2e_ms=459.80, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.7
+  [warmup] run 2/3: prompt_tokens=128, gen_tokens=36, prefill_ms=16.14, decode_ms=443.61, e2e_ms=459.75, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.7
+  [warmup] run 3/3: prompt_tokens=128, gen_tokens=36, prefill_ms=16.13, decode_ms=443.50, e2e_ms=459.64, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.8
+
+  [timed] run 1/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.12, decode_ms=443.56, e2e_ms=459.69, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.8
+  [timed] run 2/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.13, decode_ms=443.57, e2e_ms=459.70, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.8
+  [timed] run 3/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.13, decode_ms=443.60, e2e_ms=459.74, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.7
+  [timed] run 4/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.13, decode_ms=443.55, e2e_ms=459.70, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.8
+  [timed] run 5/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.14, decode_ms=443.63, e2e_ms=459.77, decode_phase_tps=81.1, request_gen_tps=78.3, e2e_tps=356.7
+  [timed] run 6/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.13, decode_ms=443.59, e2e_ms=459.73, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.7
+  [timed] run 7/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.13, decode_ms=443.67, e2e_ms=459.82, decode_phase_tps=81.1, request_gen_tps=78.3, e2e_tps=356.7
+  [timed] run 8/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.14, decode_ms=443.56, e2e_ms=459.71, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.7
+  [timed] run 9/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.12, decode_ms=443.68, e2e_ms=459.81, decode_phase_tps=81.1, request_gen_tps=78.3, e2e_tps=356.7
+  [timed] run 10/10: prompt_tokens=128, gen_tokens=36, prefill_ms=16.13, decode_ms=443.51, e2e_ms=459.65, decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.8
+  [grout] mean over 10 runs: decode_phase_tps=81.2, request_gen_tps=78.3, e2e_tps=356.7, elapsed=0.460s
+
+--- grout pp=512 tg=36  (reps=10 BM=128 BN_PRE=128 BN_DEC=32 NKS=16 max_seq=4096 GQA=0 LPT=0 GROUP=0 SW=0 SCHED=1 MASK_SPLIT=0) ---
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from ../hf_models/qwen3_32b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [2143 chars]
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=80.1, request_gen_tps=12.7, prompt_s=1.613
+  [warmup] run 1/3: prompt_tokens=512, gen_tokens=36, prefill_ms=27.64, decode_ms=450.62, e2e_ms=478.27, decode_phase_tps=79.9, request_gen_tps=75.3, e2e_tps=1145.8
+  [warmup] run 2/3: prompt_tokens=512, gen_tokens=36, prefill_ms=27.38, decode_ms=449.70, e2e_ms=477.10, decode_phase_tps=80.1, request_gen_tps=75.5, e2e_tps=1148.6
+  [warmup] run 3/3: prompt_tokens=512, gen_tokens=36, prefill_ms=27.43, decode_ms=449.67, e2e_ms=477.11, decode_phase_tps=80.1, request_gen_tps=75.5, e2e_tps=1148.6
+
+  [timed] run 1/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.41, decode_ms=449.90, e2e_ms=477.33, decode_phase_tps=80.0, request_gen_tps=75.4, e2e_tps=1148.1
+  [timed] run 2/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.62, decode_ms=450.72, e2e_ms=478.35, decode_phase_tps=79.9, request_gen_tps=75.3, e2e_tps=1145.6
+  [timed] run 3/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.43, decode_ms=450.28, e2e_ms=477.72, decode_phase_tps=80.0, request_gen_tps=75.4, e2e_tps=1147.1
+  [timed] run 4/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.58, decode_ms=450.04, e2e_ms=477.63, decode_phase_tps=80.0, request_gen_tps=75.4, e2e_tps=1147.3
+  [timed] run 5/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.57, decode_ms=450.73, e2e_ms=478.31, decode_phase_tps=79.9, request_gen_tps=75.3, e2e_tps=1145.7
+  [timed] run 6/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.50, decode_ms=451.36, e2e_ms=478.87, decode_phase_tps=79.8, request_gen_tps=75.2, e2e_tps=1144.4
+  [timed] run 7/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.47, decode_ms=450.25, e2e_ms=477.73, decode_phase_tps=80.0, request_gen_tps=75.4, e2e_tps=1147.1
+  [timed] run 8/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.46, decode_ms=449.69, e2e_ms=477.16, decode_phase_tps=80.1, request_gen_tps=75.4, e2e_tps=1148.4
+  [timed] run 9/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.46, decode_ms=450.26, e2e_ms=477.73, decode_phase_tps=80.0, request_gen_tps=75.4, e2e_tps=1147.1
+  [timed] run 10/10: prompt_tokens=512, gen_tokens=36, prefill_ms=27.48, decode_ms=450.40, e2e_ms=477.89, decode_phase_tps=79.9, request_gen_tps=75.3, e2e_tps=1146.7
+  [grout] mean over 10 runs: decode_phase_tps=79.9, request_gen_tps=75.3, e2e_tps=1146.7, elapsed=0.478s
+
+--- grout pp=2048 tg=36  (reps=10 BM=128 BN_PRE=128 BN_DEC=32 NKS=16 max_seq=4096 GQA=0 LPT=0 GROUP=0 SW=8 SCHED=1 MASK_SPLIT=0) ---
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from ../hf_models/qwen3_32b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [8579 chars]
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=78.7, request_gen_tps=12.8, prompt_s=1.600
+  [warmup] run 1/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=105.16, decode_ms=468.06, e2e_ms=573.25, decode_phase_tps=76.9, request_gen_tps=62.8, e2e_tps=3635.4
+  [warmup] run 2/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=103.12, decode_ms=463.16, e2e_ms=566.30, decode_phase_tps=77.7, request_gen_tps=63.6, e2e_tps=3680.0
+  [warmup] run 3/3: prompt_tokens=2048, gen_tokens=36, prefill_ms=105.08, decode_ms=461.30, e2e_ms=566.40, decode_phase_tps=78.0, request_gen_tps=63.6, e2e_tps=3679.4
+
+  [timed] run 1/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=103.47, decode_ms=461.79, e2e_ms=565.29, decode_phase_tps=78.0, request_gen_tps=63.7, e2e_tps=3686.6
+  [timed] run 2/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=104.07, decode_ms=461.38, e2e_ms=565.48, decode_phase_tps=78.0, request_gen_tps=63.7, e2e_tps=3685.4
+  [timed] run 3/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=103.29, decode_ms=460.98, e2e_ms=564.30, decode_phase_tps=78.1, request_gen_tps=63.8, e2e_tps=3693.1
+  [timed] run 4/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=104.50, decode_ms=461.32, e2e_ms=565.84, decode_phase_tps=78.0, request_gen_tps=63.6, e2e_tps=3683.0
+  [timed] run 5/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=104.84, decode_ms=466.56, e2e_ms=571.43, decode_phase_tps=77.2, request_gen_tps=63.0, e2e_tps=3647.0
+  [timed] run 6/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=102.62, decode_ms=461.88, e2e_ms=564.52, decode_phase_tps=77.9, request_gen_tps=63.8, e2e_tps=3691.6
+  [timed] run 7/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=106.98, decode_ms=467.86, e2e_ms=574.87, decode_phase_tps=76.9, request_gen_tps=62.6, e2e_tps=3625.2
+  [timed] run 8/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=103.90, decode_ms=464.37, e2e_ms=568.30, decode_phase_tps=77.5, request_gen_tps=63.3, e2e_tps=3667.1
+  [timed] run 9/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=106.88, decode_ms=462.93, e2e_ms=569.84, decode_phase_tps=77.8, request_gen_tps=63.2, e2e_tps=3657.2
+  [timed] run 10/10: prompt_tokens=2048, gen_tokens=36, prefill_ms=104.93, decode_ms=463.39, e2e_ms=568.34, decode_phase_tps=77.7, request_gen_tps=63.3, e2e_tps=3666.8
+  [grout] mean over 10 runs: decode_phase_tps=77.7, request_gen_tps=63.4, e2e_tps=3670.3, elapsed=0.568s
+
+--- grout pp=8192 tg=36  (reps=10 BM=128 BN_PRE=128 BN_DEC=64 NKS=32 max_seq=8228 GQA=0 LPT=0 GROUP=0 SW=8 SCHED=1 MASK_SPLIT=0) ---
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/prefill_hints.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=2048" carries no l2 key; only source-level staleness checks applied
+tuning record benchmarks/tuning/sm_100/wide_prefill.json: bucket "pp=8192" carries no l2 key; only source-level staleness checks applied
+Loaded model from ../hf_models/qwen3_32b
+Prompt: The quick brown fox jumps over the lazy dog. Pack my box with five dozen liquor jugs. How vexingly quick daft zebras jump! Sphinx of black quartz, judge my vow.… [34258 chars]
+Generating 36 tokens x 10 measured reps (+ 3 warmup reps after JIT, all discarded)...
+
+JIT compile + graph capture...
+  done: decode_phase_tps=79.0, request_gen_tps=11.3, prompt_s=1.967
+  [warmup] run 1/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=471.56, decode_ms=460.74, e2e_ms=932.33, decode_phase_tps=78.1, request_gen_tps=38.6, e2e_tps=8825.2
+  [warmup] run 2/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=472.09, decode_ms=462.95, e2e_ms=935.06, decode_phase_tps=77.8, request_gen_tps=38.5, e2e_tps=8799.4
+  [warmup] run 3/3: prompt_tokens=8192, gen_tokens=36, prefill_ms=472.96, decode_ms=465.26, e2e_ms=938.25, decode_phase_tps=77.4, request_gen_tps=38.4, e2e_tps=8769.5
+
+  [timed] run 1/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=473.12, decode_ms=463.62, e2e_ms=936.76, decode_phase_tps=77.7, request_gen_tps=38.4, e2e_tps=8783.4
+  [timed] run 2/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=473.66, decode_ms=462.80, e2e_ms=936.48, decode_phase_tps=77.8, request_gen_tps=38.4, e2e_tps=8786.1
+  [timed] run 3/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=473.56, decode_ms=463.90, e2e_ms=937.48, decode_phase_tps=77.6, request_gen_tps=38.4, e2e_tps=8776.7
+  [timed] run 4/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=475.20, decode_ms=462.35, e2e_ms=937.57, decode_phase_tps=77.9, request_gen_tps=38.4, e2e_tps=8775.9
+  [timed] run 5/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=470.57, decode_ms=462.82, e2e_ms=933.41, decode_phase_tps=77.8, request_gen_tps=38.6, e2e_tps=8814.9
+  [timed] run 6/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=475.21, decode_ms=459.36, e2e_ms=934.59, decode_phase_tps=78.4, request_gen_tps=38.5, e2e_tps=8803.9
+  [timed] run 7/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=475.83, decode_ms=464.16, e2e_ms=940.02, decode_phase_tps=77.6, request_gen_tps=38.3, e2e_tps=8753.0
+  [timed] run 8/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=475.04, decode_ms=461.93, e2e_ms=937.00, decode_phase_tps=77.9, request_gen_tps=38.4, e2e_tps=8781.2
+  [timed] run 9/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=475.24, decode_ms=462.88, e2e_ms=938.14, decode_phase_tps=77.8, request_gen_tps=38.4, e2e_tps=8770.5
+  [timed] run 10/10: prompt_tokens=8192, gen_tokens=36, prefill_ms=471.40, decode_ms=463.92, e2e_ms=935.34, decode_phase_tps=77.6, request_gen_tps=38.5, e2e_tps=8796.8
+  [grout] mean over 10 runs: decode_phase_tps=77.8, request_gen_tps=38.4, e2e_tps=8784.2, elapsed=0.937s
+
+[1;36m==> Benchmark: SGLang (no-radix)[0m
+
+[1;36m==> Benchmark: vLLM (cuda-graph, prefix-cache OFF)[0m
+
+[1;36m==> Aggregating prefill scan[0m
+wrote /home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/aggregate.csv
+wrote /home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424/aggregate.md
+
+Done. Results in: /home/scratch.melibol_research/dev/grout/benchmarks/results/sweep/20260906_111424
+  run.jsonl, aggregate.csv, aggregate.md
