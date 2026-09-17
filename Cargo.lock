@@ -303,9 +303,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-async"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6d51fe2c9b1a89f4ac760d72a197761789f4e60db1d07d3f4d48de65a78adc9"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -320,9 +318,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-bindings"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f42e2c99c56bf2eef9d569435bfd72a478dfaea3f178b8e5bae891875bbbe2e"
+version = "0.4.0"
 dependencies = [
  "bindgen",
  "libloading 0.8.9",
@@ -334,9 +330,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-core"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84bdb592a2844148fb13bdfbbab158879f56916bde1d1a1b6580ca27f23850cd"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -347,9 +341,7 @@ dependencies = [
 
 [[package]]
 name = "cuda-core-derive"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a48da7d10c1078f7fbb87d7176e9476affadea148babf31946e348073872d44"
+version = "0.4.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -367,9 +359,7 @@ dependencies = [
 
 [[package]]
 name = "cutile"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "422c8fb32ac648113eb032a6d818f09b0862812224bd4a0ed563fc174f6f5264"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -391,9 +381,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-compiler"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cbc52ad2ae4e8a4440800673f8ccde58909f25c705d82d4925e025f6c3f3565"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -413,9 +401,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-ir"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2042f5b0e653ba62d472454ffe4278133f91b6a25a66b51e9dcbb35ac4ad950f"
+version = "0.4.0"
 dependencies = [
  "half",
  "indexmap",
@@ -424,9 +410,7 @@ dependencies = [
 
 [[package]]
 name = "cutile-macro"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16f574e698764da8e0a6b22f12dac33949bcbe48a43d94492c02f09bb8e65b6a"
+version = "0.4.0"
 dependencies = [
  "convert_case",
  "cutile-compiler",

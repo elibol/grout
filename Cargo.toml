@@ -20,12 +20,20 @@ tokenizers = "0.20.4"
 
 cudarc = { version = "0.19.2", default-features = false, features = ["std", "cublas", "dynamic-loading", "cuda-13010"] }
 
-cuda-bindings = "0.3.1"
-cuda-core = "0.3.1"
-cuda-async = "0.3.1"
-cutile-compiler = "0.3.1"
-cutile = { version = "0.3.1", features = ["experimental-tune"] }
+cuda-bindings = "0.4.0"
+cuda-core = "0.4.0"
+cuda-async = "0.4.0"
+cutile-compiler = "0.4.0"
+cutile = { version = "0.4.0", features = ["experimental-tune"] }
 
+
+# cutile-rs 0.4.0 is not yet on crates.io; build against the local checkout.
+[patch.crates-io]
+cuda-bindings = { path = "../cutile-rs/cuda-bindings" }
+cuda-core = { path = "../cutile-rs/cuda-core" }
+cuda-async = { path = "../cutile-rs/cuda-async" }
+cutile-compiler = { path = "../cutile-rs/cutile-compiler" }
+cutile = { path = "../cutile-rs/cutile" }
 
 [features]
 benchmarks = []
