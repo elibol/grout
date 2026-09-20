@@ -140,7 +140,10 @@ Comparable decode metric across engines: `gen_tokens / (e2e_ms - prefill_ms)`
   never let it into a measured cell.
 - **`grout_bench` is feature-gated** (`required-features =
   ["benchmarks"]`): plain `cargo build --release` silently skips it and
-  leaves a stale binary in target/release. ALWAYS
+  leaves a stale binary in target/release. The same gate applies to
+  `grout_autotune` and the microbench binaries (all declared under
+  `benchmarks/src/bin/` with `required-features = ["benchmarks"]`);
+  `benchmarks/autotune_loop.sh` builds `grout_autotune` itself. ALWAYS
   `cargo build --release --features benchmarks --bin grout_bench`
   before benching (the sweep/tile scripts do this; ad-hoc runs must
   too). A stale bench binary produced a vacuous A/B on the 5090.

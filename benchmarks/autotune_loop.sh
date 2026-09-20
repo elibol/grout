@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
-# Restart-loop driver for grout_autotune.
+# Restart-loop driver for grout_autotune — the documented last resort.
 #
-# cutile-rs 0.3.0 keeps a process-global kernel cache with no eviction, so
-# a large tuning space accumulates device-resident modules until even the
-# in-process engine reload OOMs (panic, exit 101). Trials are journaled and
-# the tuner resumes, so the robust driver is simply: rerun until clean exit.
-# Each restart clears the global cache and loses at most the in-flight trial.
+# The tuner recovers from device-state exhaustion in-process: on an
+# allocation failure it drops the engine, synchronizes the device, evicts
+# every cached kernel specialization (cutile::tile_kernel::clear_kernel_cache,
+# cutile-rs >= 0.3.1) and reloads; `--evict-every N` does the same
+# proactively every N trials. This wrapper only matters when that reload
+# itself fails (the tuner exits 3 without logging the candidate): trials are
+# journaled and the search resumes, so the driver is simply rerun until a
+# clean exit. Each restart loses at most the in-flight trial.
+#
+# The tuner is behind the `benchmarks` cargo feature; a plain
+# `cargo build --release` does not produce it (and leaves any stale copy in
+# place), so build it here.
 set -u
 MAX_RESTARTS="${MAX_RESTARTS:-25}"
+cargo build --release --features benchmarks --bin grout_autotune || exit 1
 for i in $(seq 1 "$MAX_RESTARTS"); do
   target/release/grout_autotune "$@"
   rc=$?

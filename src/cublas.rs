@@ -84,6 +84,10 @@ fn selected_fast_compute_type(
                 //   gate_up (m=51200,k=5120,n=1), where compute16 wins.
                 // Keep the old compute16 default on sm_120/RTX 5090.
                 Some((10, 0)) => n == 1 && m == 51200 && k == 5120,
+                // Every other arch takes the fp16-accumulate path: sm_120,
+                // sm_121 (GB10 / DGX Spark, never retuned), and anything not
+                // yet measured. Only sm_100 has been measured to prefer
+                // 32F_FAST_16F for most decode GEMVs.
                 _ => true,
             }
         }

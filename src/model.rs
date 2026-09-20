@@ -251,6 +251,17 @@ impl TunedDefaults {
         let mut by_key: HashMap<String, Vec<(usize, i64)>> = HashMap::new();
         let site_dir = dir.join(arch);
         let Ok(entries) = std::fs::read_dir(&site_dir) else {
+            // Never silent: the DGX Spark (sm_121) bring-up ran built-in
+            // defaults for a whole pass before anyone noticed. No cross-arch
+            // fallback either — sm_120 records on the GB10 measured slower
+            // than the defaults (28.0 vs 29.5 tok/s). Generate records for
+            // the arch with grout_autotune instead.
+            eprintln!(
+                "no tuning records for {arch} under {} (expected {}); using built-in defaults — \
+                 run benchmarks/autotune_loop.sh on this GPU to produce them",
+                dir.display(),
+                site_dir.display()
+            );
             return Self::default();
         };
         let tileiras =

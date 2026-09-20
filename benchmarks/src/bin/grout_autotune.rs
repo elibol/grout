@@ -78,6 +78,20 @@ struct Args {
     /// each generated text hash (in-process determinism probe), then exit.
     #[arg(long, default_value_t = 0)]
     gate_probe: usize,
+    /// Proactive device-state hygiene: every N completed trials, drop the
+    /// engine, quiesce, evict every cached kernel specialization and reload
+    /// — before an allocation fails rather than after (0 = reactive only).
+    /// Each eviction costs one engine reload (seconds to a minute on a
+    /// 32B model), so pick N from how many specializations fit: ~40 on a
+    /// 180 GB B200 with Qwen3-32B, more on smaller models.
+    #[arg(long, default_value_t = 0)]
+    evict_every: usize,
+    /// Prefill buckets (prompt lengths) for the prefill sites, e.g.
+    /// "18,512,2048,8192". Records apply from a bucket's length upward, and
+    /// a prompt shorter than the smallest bucket receives that bucket's
+    /// winner — include a short bucket when short prompts matter.
+    #[arg(long, default_value = "512,2048,8192")]
+    pp_buckets: String,
     /// Extra explicit candidate(s) for the selected site, e.g. a hand
     /// profile to wire in as-is: `--require GROUT_ATTN_BM_PREFILL=128,GROUT_ATTN_BN_PREFILL=128,GROUT_FMHA_PREFILL_OCCUPANCY=2`.
     /// Repeatable. Measured before the grid (like the shipping incumbents),
@@ -105,7 +119,7 @@ struct Bucket {
     decode_objective: bool,
 }
 
-fn sites(max_seq_len: usize) -> Vec<Site> {
+fn sites(max_seq_len: usize, pp_buckets: &[usize]) -> Vec<Site> {
     // Axes mirror the original tile-sweep scripts (sweep_pp_tile.sh /
     // sweep_tg_tile.sh) plus the knobs the shipping sm_100/sm_120 profiles
     // set — critically including the KERNEL DISPATCH flag
@@ -162,8 +176,9 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 // two prefill buckets to warps=4 and wide prefill to 2.
                 ("GROUT_FMHA_PREFILL_WARPS", vec![0, 2, 4, 8]),
             ],
-            buckets: [512usize, 2048, 8192]
-                .into_iter()
+            buckets: pp_buckets
+                .iter()
+                .copied()
                 .filter(|pp| *pp < max_seq_len)
                 .map(pp_bucket)
                 .collect(),
@@ -198,8 +213,9 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 // Live for every dispatch; 0 = compiler default (elided).
                 ("GROUT_FMHA_PREFILL_CGA", cga_axis.clone()),
             ],
-            buckets: [512usize, 2048, 8192]
-                .into_iter()
+            buckets: pp_buckets
+                .iter()
+                .copied()
                 .filter(|pp| *pp < max_seq_len)
                 .map(pp_bucket)
                 .collect(),
@@ -236,9 +252,11 @@ fn sites(max_seq_len: usize) -> Vec<Site> {
                 ("GROUT_QK_PREFILL_WARPS", vec![0, 1, 2, 4]),
                 ("GROUT_QK_PREFILL_CGA", cga_axis.clone()),
             ],
-            buckets: [2048usize, 8192]
-                .into_iter()
-                .filter(|pp| *pp < max_seq_len)
+            // Wide fused-Q/KV prefill only pays off at long prompts.
+            buckets: pp_buckets
+                .iter()
+                .copied()
+                .filter(|pp| *pp >= 2048 && *pp < max_seq_len)
                 .map(pp_bucket)
                 .collect(),
         },
@@ -604,6 +622,10 @@ struct EngineOracle<'a> {
     engine: Option<Qwen3Engine>,
     model_dir: PathBuf,
     max_seq_len: usize,
+    /// `--evict-every`: 0 = reactive recovery only.
+    evict_every: usize,
+    /// Trials completed since the last eviction/reload.
+    trials_since_evict: usize,
     rt: &'a tokio::runtime::Runtime,
     prompt: String,
     max_new_tokens: usize,
@@ -639,10 +661,13 @@ fn is_alloc_failure(e: &anyhow::Error) -> bool {
     is_alloc_reason(&format!("{e:#}"))
 }
 
-/// Last resort when in-process recovery itself fails (the engine cannot be
-/// reloaded): exit non-zero WITHOUT logging the candidate so
+/// Last resort when in-process recovery (`recover_device_state`: drop the
+/// engine, quiesce, evict the kernel cache, reload) itself fails because the
+/// reload cannot allocate: exit non-zero WITHOUT logging the candidate so
 /// `autotune_loop.sh` restarts a fresh process, whose resumed search
-/// measures that candidate first.
+/// measures that candidate first. With `--evict-every` set this path
+/// should be rare; it exists because eviction cannot guarantee that every
+/// later allocation succeeds.
 fn exit_for_fresh_process(context: &str) -> ! {
     eprintln!(
         "  device allocation failure {context} — exiting with code 3 so autotune_loop.sh \
@@ -673,6 +698,7 @@ impl EngineOracle<'_> {
         // no cached module can still be executing on any stream.
         let evicted = unsafe { cutile::tile_kernel::clear_kernel_cache() };
         self.engine = Some(load_engine(self.rt, &self.model_dir, self.max_seq_len)?);
+        self.trials_since_evict = 0;
         Ok(evicted)
     }
 
@@ -734,6 +760,26 @@ impl Objective for EngineOracle<'_> {
 
     fn measure(&mut self, index: usize) -> Trial {
         let id = self.configs[index].id.clone();
+        // Proactive hygiene: same drop -> quiesce -> evict -> reload as the
+        // reactive path, run before the trial so an allocation failure is
+        // never the trigger. A failed reload here is the same last resort.
+        if self.evict_every > 0 && self.trials_since_evict >= self.evict_every {
+            let since = self.trials_since_evict;
+            match self.recover_device_state() {
+                Ok(evicted) => {
+                    eprintln!(
+                        "  proactive eviction after {since} trials: {evicted} cached kernel \
+                         specialization(s) evicted, engine reloaded"
+                    );
+                }
+                Err(err) => {
+                    let _ = self.log.flush();
+                    exit_for_fresh_process(&format!(
+                        "before {id} (proactive eviction reload failed: {err:#})"
+                    ));
+                }
+            }
+        }
         let mut recovered = false;
         let trial = loop {
             match self.measure_inner(index) {
@@ -772,6 +818,7 @@ impl Objective for EngineOracle<'_> {
         if let Ok(line) = serde_json::to_string(&trial) {
             let _ = writeln!(self.log, "{line}");
         }
+        self.trials_since_evict += 1;
         match &trial.state {
             TrialState::Measured { median_ms, .. } => {
                 println!("  {} -> {median_ms:.2} ms", trial.config_id)
@@ -814,6 +861,12 @@ fn detect_arch() -> String {
 fn main() -> Result<()> {
     let args = Args::parse();
     let arch = detect_arch();
+    let pp_buckets: Vec<usize> = args
+        .pp_buckets
+        .split(',')
+        .map(|v| v.trim().parse::<usize>().context("--pp-buckets"))
+        .collect::<Result<_>>()?;
+    anyhow::ensure!(!pp_buckets.is_empty(), "--pp-buckets is empty");
     let out_dir = PathBuf::from(&args.out_dir).join(&arch);
     fs::create_dir_all(&out_dir)?;
 
@@ -827,7 +880,7 @@ fn main() -> Result<()> {
     let tileiras = cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string();
 
     if args.gate_probe > 0 {
-        let site_list = sites(args.max_seq_len);
+        let site_list = sites(args.max_seq_len, &pp_buckets);
         let bucket = &site_list[0].buckets[0];
         let prompt_path =
             PathBuf::from(&args.prompt_dir).join(format!("pp_{}.txt", bucket.prompt_pp));
@@ -854,7 +907,7 @@ fn main() -> Result<()> {
         // SAFETY: single-threaded, before any engine exists.
         unsafe { std::env::set_var("GROUT_TUNING_RECORD_DIR", &args.out_dir) };
     }
-    for site in sites(args.max_seq_len) {
+    for site in sites(args.max_seq_len, &pp_buckets) {
         if args.site != "all" && args.site != site.name {
             continue;
         }
@@ -972,6 +1025,8 @@ fn main() -> Result<()> {
                 }),
                 model_dir: model_dir.clone(),
                 max_seq_len: args.max_seq_len,
+                evict_every: args.evict_every,
+                trials_since_evict: 0,
                 rt: &rt,
                 prompt,
                 max_new_tokens: bucket.max_new_tokens,
