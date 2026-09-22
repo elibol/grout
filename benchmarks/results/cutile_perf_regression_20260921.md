@@ -86,3 +86,62 @@ Keep the lifetime guarantee, drop the per-launch cost:
 
 Grout's side needs no change; the numbers above are what 0.4.0 would ship
 with as of 0210b63.
+
+## Fix verification (same day): `perf/submission-overhead` @ 4b0f442
+
+Fix branch (off main 3ac6fb9): per-launch access leases no longer allocate
+(u64 ids, inline storage); graph replay reacquires a frozen, per-storage
+deduplicated resource list instead of walking every recorded context.
+
+### Run 1 — v0.3.1 (2e4510f) → fix (4b0f442): PASS
+
+| cell | metric | v0.3.1 | fix | ratio | v0.3.1 IQR | fix IQR |
+|---|---|---:|---:|---:|---|---|
+| pp18_tg128 | prefill_ms | 7.20 | 7.13 | 0.991 | 6.8–7.3 | 7.1–7.1 |
+| pp18_tg128 | decode_tok_s | 173.20 | 172.75 | 0.997 | 171.9–173.6 | 172.7–172.8 |
+| pp2048_tg128 | prefill_ms | 58.62 | 59.10 | 1.008 | 58.1–59.0 | 58.6–59.4 |
+| pp2048_tg128 | decode_tok_s | 166.30 | 165.75 | 0.997 | 165.9–166.5 | 165.5–165.9 |
+| pp8192_tg16 | prefill_ms | 391.84 | 393.71 | 1.005 | 391.5–392.5 | 393.1–394.7 |
+| pp8192_tg16 | decode_tok_s | 159.10 | 159.10 | 1.000 | 158.5–160.4 | 157.4–160.0 |
+
+### Run 2 — pre-#275 (d2c50c8) → fix (4b0f442): PASS
+
+| cell | metric | pre-#275 | fix | ratio | pre-#275 IQR | fix IQR |
+|---|---|---:|---:|---:|---|---|
+| pp18_tg128 | prefill_ms | 6.88 | 7.13 | 1.036 | 6.8–7.2 | 7.1–7.4 |
+| pp18_tg128 | decode_tok_s | 173.40 | 172.75 | 0.996 | 173.2–173.5 | 172.4–172.9 |
+| pp2048_tg128 | prefill_ms | 58.78 | 58.55 | 0.996 | 58.4–59.3 | 58.3–59.5 |
+| pp2048_tg128 | decode_tok_s | 165.90 | 165.20 | 0.996 | 165.8–166.0 | 165.0–165.4 |
+| pp8192_tg16 | prefill_ms | 392.13 | 393.79 | 1.004 | 391.7–392.6 | 393.2–394.1 |
+| pp8192_tg16 | decode_tok_s | 158.45 | 158.75 | 1.002 | 157.6–158.7 | 158.3–159.1 |
+
+Decode is back to pre-regression within 0.4% everywhere. The pp18 prefill
++3.6% has overlapping IQRs (and the same fix read 0.99× v0.3.1 in run 1), so
+it is within the resolution of a desktop GPU, not a residual regression.
+
+### Per-launch host cost, done properly
+
+The single-run op tables printed by the script are too noisy to size
+sub-microsecond residuals (the same binary read 1971 and 2141 µs per step in
+two runs). Interleaving three binaries over five rounds with eleven prefill
+steps each and taking medians:
+
+| op (host launch, µs) | calls/step | pre-#275 | main unfixed | fix | fix − pre |
+|---|---:|---:|---:|---:|---:|
+| MatMulSlice (cuBLAS) | 180 | 4.34 | 4.32 | 4.34 | +0.00 |
+| MatMul (cuBLAS) | 72 | 4.94 | 4.89 | 4.91 | −0.03 |
+| QkNormRopeKvPrefill | 36 | 6.78 | 6.52 | 6.70 | −0.08 |
+| Attention | 36 | 3.84 | 3.91 | 3.84 | +0.00 |
+| AddRmsNorm | 36 | 3.31 | 3.67 | 3.34 | +0.03 |
+| RmsNorm | 37 | 2.53 | 2.66 | 2.53 | +0.00 |
+| SiluMul | 36 | 2.26 | 2.35 | 2.28 | +0.02 |
+| Add | 36 | 2.25 | 2.39 | 2.26 | +0.01 |
+| **sum per prefill step** | | 1944 | 1957 | 1944 | −1 |
+
+Median residual per cuTile kernel launch, fix vs pre-#275: **+0.00 µs**
+(range −0.08 … +0.03). The expected ~0.24 µs/launch of remaining mutex
+traffic is not visible through grout's launch path at this resolution; the
+unfixed main's per-launch cost on the small kernels is +0.1–0.36 µs here,
+so the decode regression was dominated by the per-replay resource walk,
+which the fix removes. No case for a lock-free access tracker from grout's
+side at this point.
