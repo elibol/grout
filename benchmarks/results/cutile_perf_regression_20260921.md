@@ -1,0 +1,88 @@
+# cutile-rs perf regression: v0.3.1 → main (0210b63), measured through grout
+
+Date: 2026-09-21. GPU: RTX 5090 (sm_120), CUDA 13.3 host toolkit, default
+clocks. Model: Qwen3-4B f16. Grout `safe-kernels` @ `119fb85` built twice from
+the same source against two cutile-rs revisions taken from a read-only clone
+of `../cutile-rs`; tuning records disabled on both arms (a record stamped for
+one cutile version is refused by the other and would confound the pairing).
+Runs alternate arm order every round; 4 rounds × 3 reps per cell. Numerics
+were verified identical beforehand (all 28 engine kernels JIT with identical
+check-placement counts; attention and GEMM output hashes and greedy text
+byte-identical to 0.3.1).
+
+Reproduce: `benchmarks/cutile_perf_regression.sh v0.3.1 HEAD` (grout
+`safe-kernels`; `CUTILE_REPO` selects the cutile-rs checkout; exits 1 on a
+regression > 1.5% with non-overlapping interquartile ranges).
+
+## Result: FAIL
+
+| cell | metric | v0.3.1 (2e4510f) | main (0210b63) | ratio | v0.3.1 IQR | main IQR | n |
+|---|---|---:|---:|---:|---|---|---|
+| pp18_tg128 | prefill_ms | 6.82 | 7.58 | 1.111 | 6.8–6.8 | 7.2–7.8 | 12/12 | **REGRESSION** |
+| pp18_tg128 | decode_tok_s | 171.60 | 167.25 | 0.975 | 171.3–171.8 | 167.2–167.4 | 12/12 | **REGRESSION** |
+| pp2048_tg128 | prefill_ms | 59.66 | 59.62 | 0.999 | 58.9–59.9 | 58.8–60.5 | 12/12 | |
+| pp2048_tg128 | decode_tok_s | 164.45 | 160.30 | 0.975 | 164.3–164.6 | 160.1–160.4 | 12/12 | **REGRESSION** |
+| pp8192_tg16 | prefill_ms | 395.36 | 397.72 | 1.006 | 394.5–395.9 | 396.9–398.4 | 12/12 | |
+| pp8192_tg16 | decode_tok_s | 157.90 | 154.20 | 0.977 | 156.0–158.2 | 153.6–154.9 | 12/12 | **REGRESSION** |
+
+Shape of the signature: decode −2.5% in every cell regardless of context
+length, short prefill +5–11%, long prefill at parity. That is a fixed
+per-step / per-launch host cost, not kernel speed (a cuBLAS-only GEMV
+microbench is unchanged between the two builds).
+
+## Per-launch host cost (prefill StepGraph ops, `--profile` + `GROUT_PROFILE_OPS=1`)
+
+| op (host launch, avg µs) | calls/step | v0.3.1 | main | ratio |
+|---|---:|---:|---:|---:|
+| MatMulSlice (cuBLAS) | 180 | 4.34 | 4.61 | 1.06 |
+| MatMul (cuBLAS) | 72 | 4.92 | 5.20 | 1.06 |
+| QkNormRopeKvPrefill | 36 | 7.09 | 7.86 | 1.11 |
+| Attention | 36 | 3.93 | 4.48 | 1.14 |
+| AddRmsNorm | 36 | 3.37 | 4.24 | 1.26 |
+| RmsNorm | 37 | 2.58 | 3.23 | 1.25 |
+| SiluMul | 36 | 2.30 | 2.86 | 1.24 |
+| Add | 36 | 2.29 | 2.71 | 1.18 |
+| **sum over one prefill step** | | 1971 | 2204 | **1.12** |
+
+Every cuTile kernel launch costs +0.4–0.9 µs more (18–26% on the small
+kernels); ops routed through grout's own cuBLAS `DeviceOp` (which also run
+through an `ExecutionContext`) +6%.
+
+## Bisect (same grout source, paired, records off)
+
+| cutile-rs revision | pp18 decode tok/s | pp18 prefill ms | note |
+|---|---:|---:|---|
+| d2c50c8 (0.4.0 version bump, before #275) | 173.4 | 6.83 | baseline behaviour |
+| 17c1835 — #275 "f8 rounding, latency generics, async tensor safety" | 170.4 (−1.7%) | 6.90 | **decode regression lands here**; per-launch cost of cuTile ops +0.3 µs (AddRmsNorm 3.43→3.99, Attention 4.03→4.40, SiluMul 2.39→2.70) |
+| 11f7665 — #285 | ≈ #275 | ≈ #275 | no further change resolvable above noise |
+| 0210b63 — main (incl. #298) | ≈ #275 (1.003 vs #275) | 7.19–7.58 | short-prefill increment after #275 is real in aggregate (+5–11% vs v0.3.1) but too noisy to pin to #285 vs #298 on a desktop GPU |
+
+## Mechanism (from the #275 diff)
+
+`cuda-async/src/submission.rs` + `device_operation.rs`: every
+`ExecutionContext::new` now allocates an `Arc<Submission>` holding two
+`Mutex<Vec<…>>`; each launch `retain()`s its tensor arguments as
+`Box<dyn Send>` under the lock and `complete()`s under the lock again. Graph
+replay (`GraphLaunch::execute`) calls `context.retain(exec.clone())` and then
+walks **every recorded resource** of the graph, calling `retain_for_launch`
+for each, on **every** replay. Grout's decode step is one graph replay of a
+36-layer step (hundreds of recorded tensors), so that loop runs per token —
+the constant −2.5% across context lengths.
+
+## Ask
+
+Keep the lifetime guarantee, drop the per-launch cost:
+
+1. Graph replay: retain the recorded resource set as a single shared owner
+   (one `Arc` of the frozen `Vec<Arc<dyn ReplayResource>>`, cloned once per
+   launch) instead of per-resource `retain_for_launch` per replay.
+2. Per-launch: create the `Submission` lazily (many ops retain nothing) or
+   pool it; avoid the `Box<dyn Send>` per retained argument (store the
+   storage `Arc` directly, `SmallVec` inline); a lock-free or `Cell`-based
+   owner list for the common single-thread case.
+3. Add the paired test to the release gate: `cutile-examples`/grout
+   `benchmarks/cutile_perf_regression.sh <prev-release> HEAD` must PASS
+   (no metric > 1.5% worse with non-overlapping IQRs) before a version bump.
+
+Grout's side needs no change; the numbers above are what 0.4.0 would ship
+with as of 0210b63.
