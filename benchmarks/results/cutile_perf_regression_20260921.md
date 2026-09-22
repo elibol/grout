@@ -175,3 +175,60 @@ side at this point.
 4. Pre-built binaries for all three arms:
    `/tmp/claude-1000/cpr_fix/target_{d2c50c8,2e4510f,4b0f442}/release/grout_bench`
    (records dir must be `/nonexistent` for records-off arms).
+
+## 2026-09-22: merged main (6b6351b, includes the #275 fix as #302), quiet system
+
+All pairings 4 rounds × 3 reps unless noted; IQRs are a few hundredths wide.
+
+| pairing | pp18 prefill | pp18 decode | pp2048 prefill / decode | pp8192 prefill / decode | gate |
+|---|---:|---:|---:|---:|---|
+| v0.3.0 → v0.3.1 | 0.995 | 1.000 | 1.000 / 1.000 | 1.001 / 0.999 | **PASS** (no 0.3.1 regression; 0.3.1 halves per-launch host cost, 2593 → 1881 µs/step) |
+| v0.3.1 → main | **1.044** | 0.996 | 1.005 / 0.996 | 1.004 / 0.997 | **FAIL** (pp18 prefill) |
+| v0.3.0 → main | **1.037** | 0.998 | 1.005 / 0.996 | 1.005 / 0.997 | **FAIL** (pp18 prefill) |
+| pre-#275 d2c50c8 → main | **1.043** | 0.996 | 1.005 / 0.996 | 1.005 / 0.997 | **FAIL** (pp18 prefill) |
+
+Decode is recovered to within 0.4% (a consistent −0.3…−0.4% with disjoint
+IQRs remains in every cell, under the gate). Long prefill +0.4–0.5%. The
+short-prefill residual is real and reproducible: +0.29–0.32 ms per prefill
+step against every baseline.
+
+### Where the residual lives (3 arms interleaved, 6 rounds × 3 reps, records off)
+
+| cell | v0.3.1 | main | Δ |
+|---|---:|---:|---:|
+| pp18 | 6.86 ms | 7.18 ms | **+0.32 ms (+4.7%)** |
+| pp128 | 7.82 | 7.87 | +0.05 ms |
+| pp512 | 15.66 | 15.76 | +0.10 ms |
+
+Same ~650 ops per prefill step at every length, yet the delta collapses as the
+prompt grows: the host-bound → GPU-bound transition. At pp18 the step is
+host-bound (GPU idle between launches), so per-op host cost lands on the wall
+clock in full; from pp128 up the GPU is the bottleneck and hides it. The
+per-launch `execute` cost is at parity (op table sum 1876 → 1917 µs vs
+pre-#275), so the ~0.5 µs/op sits in the **await path** — `DeviceFuture::poll`
+now runs `ctx.complete()` (a `Submission::complete()` under its lock) for every
+awaited op. Decode replays one graph per token and awaits once, hence no
+decode signature.
+
+### Paper configuration (records ON, sm_120 records, pre-#275 vs main)
+
+| cell | metric | pre-#275 | main | ratio | paper (5090/4B) |
+|---|---|---:|---:|---:|---|
+| pp18_tg128 | prefill ms | 6.82 | 7.12 | 1.043 | ~6.9–7.0 |
+| pp18_tg128 | decode tok/s | 176.7 | 176.1 | 0.997 | 171–175 |
+| pp2048_tg128 | prefill ms | 50.84 | 51.03 | 1.004 | 51.0–52.4 |
+| pp2048_tg128 | decode tok/s | 169.4 | 168.7 | 0.996 | ~169 |
+| pp8192_tg16 | prefill ms | 277.7 | 281.8 | 1.015 | 284–292 |
+| pp8192_tg16 | decode tok/s | 162.4 | 161.8 | 0.997 | ~160 |
+
+The records-on numbers reproduce the paper's cells (this was a quiet system,
+hence slightly better than the published medians). Impact of the residual on
+the paper's reported metrics: pp18 pure prefill would read 7.1 instead of
+6.9 ms; request tok/s at pp18/tg36 changes by <0.1% (0.3 ms of a ~750 ms
+request); every other cell within 1.5%.
+
+### Verdict
+
+The #275 decode regression is fixed by #302. A per-op host cost of ~0.5 µs
+in the await path remains; it costs +4.3% on host-bound short prefill and is
+hidden elsewhere. Gate: FAIL on pp18 prefill until that is addressed.
