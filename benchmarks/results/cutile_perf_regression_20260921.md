@@ -232,3 +232,53 @@ request); every other cell within 1.5%.
 The #275 decode regression is fixed by #302. A per-op host cost of ~0.5 µs
 in the await path remains; it costs +4.3% on host-bound short prefill and is
 hidden elsewhere. Gate: FAIL on pp18 prefill until that is addressed.
+
+## 2026-09-22 (later): await-path fix `perf/await-path` @ e6bc238 — no measurable change
+
+Gate results (quiet 5090, records off, 4 rounds × 3 reps):
+
+| pairing | pp18 prefill | decode (18/2048/8192) | long prefill | gate |
+|---|---:|---:|---:|---|
+| v0.3.1 → e6bc238 | **+4.8%** (6.79 → 7.11) | 0.996 / 0.996 / 0.996 | +0.5% / +0.4% | **FAIL** |
+| pre-#275 → e6bc238 | **+4.4%** (6.79 → 7.09) | 0.996 / 0.996 / 0.997 | +0.5% / +0.4% | **FAIL** |
+
+Four arms interleaved (6 rounds × 3 reps, n=18 each), prefill only:
+
+| cell | pre-#275 | v0.3.1 | main 6b6351b | fix e6bc238 |
+|---|---:|---:|---:|---:|
+| pp18 | 6.85 | 6.86 | 7.18 | 7.19 (**+0.34 ms**) |
+| pp128 | 7.81 | 7.81 | 7.87 | 7.88 (+0.07) |
+| pp512 | 15.59 | 15.58 | 15.70 | 15.74 (+0.15) |
+
+Per-op host launch cost (`execute` window), four arms interleaved, 5 rounds ×
+11 prefill steps, medians:
+
+| op | calls | pre-#275 | v0.3.1 | main | fix | fix − pre |
+|---|---:|---:|---:|---:|---:|---:|
+| QkNormRopeKvPrefill | 36 | 5.93 | 5.63 | 6.11 | 6.21 | +0.28 |
+| Attention | 36 | 3.55 | 3.56 | 3.76 | 3.79 | +0.24 |
+| AddRmsNorm | 36 | 3.07 | 3.06 | 3.21 | 3.38 | +0.31 |
+| RmsNorm | 37 | 2.35 | 2.36 | 2.52 | 2.64 | +0.29 |
+| SiluMul | 36 | 2.10 | 2.09 | 2.20 | 2.31 | +0.21 |
+| Add | 36 | 2.09 | 2.08 | 2.30 | 2.36 | +0.27 |
+| MatMul / MatMulSlice (cuBLAS via ctx) | 72 / 180 | 4.82 / 4.23 | 4.84 / 4.27 | 4.94 / 4.31 | 4.89 / 4.29 | +0.07 / +0.06 |
+| **sum per prefill step (µs)** | | 1842 | 1841 | 1908 | 1921 | **+79** |
+
+Accounting for the pp18 step (+340 µs vs pre-#275): +79 µs is inside
+`execute` (≈ +0.25 µs per cuTile launch, ≈ +0.06 µs per cuBLAS op — the
+per-argument lease work scales with argument count), and ≈ +260 µs is outside
+it, i.e. in the await/completion path, ≈ 0.4 µs per awaited op over ~650
+ops. e6bc238 does not move either component relative to main (the
+interleaved medians put it 13 µs/step *worse* inside `execute`, within
+noise). Yesterday's "+0.00 µs per launch" was a noisy-day artefact; with a
+quiet system the execute-side cost is resolvable and real.
+
+Verdict: still FAIL on pp18 prefill. The remaining cost is what the fix's
+author describes as inherent to tracking accesses at all (one submission
+allocation per awaited op, Arc inc/dec + two CASes per argument, one lock per
+launch) plus a completion step per await. Grout never needed this tracking —
+it owns its tensors for the engine's lifetime and orders work on one stream —
+so the ask from grout's side is an **opt-out**, not further shaving: an
+`ExecutionContext` / launcher mode with access tracking disabled (unsafe if
+it must be, like `async_on`), or a cargo feature, restoring the pre-#275
+launch and await paths for callers that manage lifetimes themselves.
