@@ -282,3 +282,37 @@ so the ask from grout's side is an **opt-out**, not further shaving: an
 `ExecutionContext` / launcher mode with access tracking disabled (unsafe if
 it must be, like `async_on`), or a cargo feature, restoring the pre-#275
 launch and await paths for callers that manage lifetimes themselves.
+
+## 2026-09-22 (evening): the await-side residual bisects to #298, not #275
+
+pp18 prefill only, records off, six builds interleaved (6 rounds × 3 reps,
+n=18 each), with the per-op `execute` sum from four interleaved profile runs
+(11 prefill steps each) so the step delta splits into inside/outside execute:
+
+| rev | pp18 prefill ms [IQR] | Δ step vs pre (µs) | execute sum (µs) | Δ execute | Δ outside execute |
+|---|---:|---:|---:|---:|---:|
+| d2c50c8 pre-#275 | 6.855 [6.85–6.86] | +0 | 1854 | +0 | +0 |
+| 17c1835 #275 | 6.930 [6.92–6.94] | +75 | 1921 | +66 | +9 |
+| 11f7665 #285 | 6.935 [6.93–6.94] | +80 | 1914 | +59 | +21 |
+| e04245b #295 | 6.930 [6.92–6.94] | +75 | 1916 | +62 | +13 |
+| **3ac6fb9 #298** | **7.250 [7.24–7.25]** | **+395** | 1924 | +70 | **+325** |
+| 6b6351b #302/main | 7.180 [7.17–7.19] | +325 | 1898 | +44 | +281 |
+
+Two separate costs, cleanly separated:
+
+- **#275 (access tracking): +66 µs per step, all inside `execute`** —
+  ≈ +0.25 µs per cuTile launch, argument-count dependent. #302 trims it to
+  +44. This is the part an opt-out would remove; on its own it is +1.1% at
+  pp18, under the gate.
+- **#298 ("Tile IR 13.4 raw APIs, target gates, and unsafe PDL"): +325 µs
+  per step, all outside `execute`** — ≈ 0.5 µs per op somewhere between the
+  op's `execute` returning and the next op being issued (future creation /
+  poll / completion). This is the component that fails the gate, and it has
+  nothing to do with access tracking; an opt-out from tracking would not
+  clear it.
+
+Grout does not enable programmatic dependent launch, so whatever #298 added
+runs on the default path for every op. Candidates from the diff: per-launch
+`ToolkitCapabilities` / target-gate lookups on the generated launcher's
+non-execute path, or the launch-site specialization cache no longer hitting
+(0.3.1's cache-hit path was what made launches cheap).
