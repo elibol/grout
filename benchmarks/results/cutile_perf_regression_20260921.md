@@ -145,3 +145,33 @@ unfixed main's per-launch cost on the small kernels is +0.1–0.36 µs here,
 so the decode regression was dominated by the per-replay resource walk,
 which the fix removes. No case for a lock-free access tracker from grout's
 side at this point.
+
+## Open items (stopped 2026-09-21 evening; pick up here)
+
+1. **pp18 prefill residual on the fix is probably real, not noise.** The fix
+   binary read 7.13 ms in both runs; pre-#275 / v0.3.1 read 6.82, 6.83 and
+   6.88 ms in three quiet runs. That is a consistent ~0.25–0.3 ms per prefill
+   step, invisible in the per-launch op table (per-launch cost is +0.00 µs)
+   and absent from decode — so a per-step, prefill-path-only cost (the
+   prefill step executes DeviceOps through ExecutionContexts and awaits
+   futures; decode replays a graph). The "0.99× v0.3.1" I cited relied on one
+   noisy v0.3.1 arm (IQR 6.8–7.3). To settle: three arms interleaved
+   (pre-#275 d2c50c8, v0.3.1 2e4510f, fix 4b0f442), pp18 / pp128 / pp512
+   prefill, 6 rounds × 3 reps, records off. If pp128/pp512 show the same
+   absolute ~0.25 ms, it is per-step; if it scales, it is per-launch after
+   all. Qualify the "merge as is" verdict to the cutile-rs agent with the
+   result.
+2. **v0.3.0 baseline.** The 09-02 check of the 0.3.1 line against 0.3.0 saw a
+   one-pass pp18 decode −4.3% that was dismissed when a second pass did not
+   reproduce it. Run paired: `benchmarks/cutile_perf_regression.sh v0.3.0 v0.3.1`
+   and `... v0.3.0 4b0f442` (`CUTILE_REPO=/tmp/claude-1000/wt-perf`). The grout
+   lib should build against 0.3.0 through `src/driver_compat.rs`; untested.
+3. **Paper cross-check.** This test runs records OFF, so its prefill numbers
+   (58.6 ms @2048, ~392 @8192) are built-in-default numbers, not the paper's
+   records-on cells (~52 / ~287 ms). Decode matches the paper (171–174 tok/s
+   at pp18). Both d2c50c8 and 4b0f442 are 0.4.0-stamped, so the sm_120 records
+   load on both: run pre-#275 vs fix with records ON at pp18_tg128 /
+   pp2048_tg128 / pp8192_tg16 to compare against the paper cells directly.
+4. Pre-built binaries for all three arms:
+   `/tmp/claude-1000/cpr_fix/target_{d2c50c8,2e4510f,4b0f442}/release/grout_bench`
+   (records dir must be `/nonexistent` for records-off arms).
