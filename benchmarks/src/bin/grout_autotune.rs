@@ -646,6 +646,20 @@ fn load_engine(
     max_seq_len: usize,
 ) -> Result<Qwen3Engine> {
     let mut engine = rt.block_on(Qwen3Engine::load(model_dir, Some(max_seq_len)))?;
+    // Benchmark semantics, identical to grout_bench's defaults and to the
+    // sweeps the records are gated against:
+    // - greedy: the engine inherits do_sample from the model's
+    //   generation_config.json (true for Qwen3, temperature 0.7 / top-k 20 /
+    //   top-p 0.8), and sampling also forces the host-side token-selection
+    //   path instead of the in-graph argmax — a different decode program
+    //   from the one that ships (found by the cutile-rs review, 2026-09-21;
+    //   every earlier tuner run measured under sampling);
+    // - raw prompts: the pp_<n>.txt files are exact token counts, and the
+    //   chat template would add its wrapper tokens (kv_len no longer the
+    //   bucket length, EVEN_K flips);
+    // - fixed decode window (EOS ignored).
+    engine.set_sampling_enabled(false);
+    engine.set_chat_template_enabled(false);
     engine.set_ignore_eos(true);
     Ok(engine)
 }
@@ -735,12 +749,26 @@ impl EngineOracle<'_> {
             }
         };
         // Gate v1 = the step succeeded (compile/launch/shape errors above
-        // invalidate the candidate). A text-match gate is not usable: the
-        // engine's greedy output is nondeterministic at the logit level
-        // (allocation-address-dependent reduction order), verified by
-        // --gate-probe. Numeric correctness of every kernel form remains
-        // covered by the GPU test suite; a strict gate needs a
-        // deterministic-eval/logits-capture engine API (tracked).
+        // invalidate the candidate).
+        //
+        // History: an earlier version of this comment blamed the lack of a
+        // text-match gate on "allocation-address-dependent reduction order"
+        // making greedy output nondeterministic. That was wrong. The engine
+        // inherited do_sample=true from the model's generation_config.json,
+        // so the --gate-probe that "verified" it was sampling (temperature
+        // 0.7, top-k 20, top-p 0.8). With sampling off (load_engine), the
+        // probe is deterministic: five runs of the default config on the
+        // 5090 produced one text hash (2026-09-21). Caught by the cutile-rs
+        // review.
+        //
+        // Why text-match is still not the gate: a *different* candidate
+        // legitimately changes floating-point summation order (tile shape,
+        // LPT vs mapped, split-K), so greedy text can diverge after a
+        // near-tie token without any kernel being wrong — a strict match
+        // would reject valid configurations. Numeric correctness of every
+        // kernel form is covered by the GPU test suite and the bitwise
+        // cross-arm gates in the exp4 harnesses; a tolerance-based gate
+        // (logit-level agreement) is the tracked follow-up.
         let _ = (&text, &self.reference_text);
         let mut samples = Vec::with_capacity(self.reps);
         for _ in 0..self.reps {
