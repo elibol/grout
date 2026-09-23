@@ -355,3 +355,34 @@ identical, so it is codegen, not the kernel body.
 Earlier framings in this report ("await path", "site-miss path") were
 wrong about the location; the per-op host tables were at parity all along
 once measured carefully, and the step-time gap was device time.
+
+## 2026-09-23: #310 (`fix/immutable-view-token-chaining` @ 7639e42) — PASS, regression closed
+
+Root cause (from the cutile-rs side, matching the sync profile exactly): at
+#298 the compiler's `set_token` copy-back carried a load's internal
+completion token out of the inlined `Partition::load` for immutable
+bindings, so the second load from each read-only partition consumed the
+first load's completion token and the two loads serialized. Only the two
+wide norm/RoPE kernels were affected. With #310 both compile to Tile IR and
+SASS identical to e04245b (5408 / 4312 instructions, 181 / 189 registers).
+
+Gate, pre-#275 d2c50c8 → 7639e42 (4 rounds × 3 reps): **PASS** — pp18
+prefill 6.84 → 6.86 (1.002), decode 0.996 / 0.996 / 1.002, long prefill
+0.997 / 1.000. The v0.3.1 → 7639e42 run flagged pp18 at +2.0%, but it ran
+under desktop load (pp8192 IQRs 10 ms wide vs ~1 ms on a quiet system); a
+three-arm interleave (6 rounds × 3 reps) puts pre-#275 / v0.3.1 / fix at
+6.785 / 6.730 / 6.730 ms — fix/v0.3.1 = 1.000, fix/pre = 0.992.
+
+Per-op sync mode (launch + kernel), pre-#275 vs fix: **QkNormRopeKvPrefill
+19.27 → 19.31 µs** (was 26.86 on main); Attention 10.37 / 10.25, AddRmsNorm
+10.25 / 10.40, RmsNorm 8.61 / 8.39, cuBLAS MatMul 32.40 / 32.68 — all parity.
+
+Numerics on 7639e42: attention hashes (causal 738bb3bcbff0d56f, GQA
+dd8d2b16d99c490a, split 097efb9cba495c05) and GEMM (f70b1d4ccd05ccec)
+identical to the recorded 0.3.1 values; greedy text at pp2048 byte-identical
+to pre-#275.
+
+Status of the 0.4.0 line through grout, once #310 is on main: decode within
+0.4% of 0.3.0/0.3.1, prefill at parity at every length, numerics identical.
+Re-run `benchmarks/cutile_perf_regression.sh v0.3.1 HEAD` on the merged rev
+before re-pinning; a quiet system is required for the pp18 cell.
