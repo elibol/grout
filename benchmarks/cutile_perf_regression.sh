@@ -77,7 +77,10 @@ for c in ["cuda-bindings", "cuda-core", "cuda-async", "cutile-compiler"]:
 s = re.sub(r'^cutile = \{ version = "[^"]+"', f'cutile = {{ version = "{ver}"', s, flags=re.M)
 open(manifest, "w").write(s)
 EOF
-    (cd "$OUT/grout" && CARGO_TARGET_DIR="$OUT/target_$sha" cargo build --release --features benchmarks --bin grout_bench 2>&1 | grep -E "^error|Finished" | sed "s/^/  build $sha: /" >&2)
+    # Older revisions need the lock re-resolved; try the local registry
+    # cache first (sandboxed runs cannot reach the index), then online.
+    (cd "$OUT/grout" && { CARGO_TARGET_DIR="$OUT/target_$sha" cargo build --offline --release --features benchmarks --bin grout_bench \
+        || CARGO_TARGET_DIR="$OUT/target_$sha" cargo build --release --features benchmarks --bin grout_bench; } 2>&1 | grep -E "^error|Finished" | sed "s/^/  build $sha: /" >&2)
     [[ -x "$OUT/target_$sha/release/grout_bench" ]] || { echo "build of $sha produced no grout_bench" >&2; exit 1; }
     echo "$OUT/target_$sha/release/grout_bench"
 }
@@ -153,11 +156,16 @@ for arm, path in [("base", ops_b), ("cand", ops_c)]:
 print(f"\n| op (host launch, avg us) | calls | {base} | {cand} | ratio |")
 print("|---|---:|---:|---:|---:|")
 tb = tc = 0.0
+# GraphLoop (whole op loop, once per step) and ConsumeInputs (between-op
+# pool drops) are reconciliation pseudo-ops, not launches: report them
+# but keep them out of the launch sum.
+PSEUDO = ("GraphLoop", "ConsumeInputs")
 for op, v in sorted(ops.items(), key=lambda kv: -kv[1].get("base", (0, 0))[0] * kv[1].get("base", (0, 0))[1]):
     if "base" in v and "cand" in v:
-        tb += v["base"][0] * v["base"][1]; tc += v["cand"][0] * v["cand"][1]
+        if op not in PSEUDO:
+            tb += v["base"][0] * v["base"][1]; tc += v["cand"][0] * v["cand"][1]
         print(f"| {op} | {v['base'][1]} | {v['base'][0]:.2f} | {v['cand'][0]:.2f} | {v['cand'][0]/v['base'][0]:.3f} |")
-print(f"| **sum over a prefill step** | | {tb:.0f} | {tc:.0f} | {tc/tb:.3f} |")
+print(f"| **sum of launches per prefill step** | | {tb:.0f} | {tc:.0f} | {tc/tb:.3f} |")
 if fail:
     print("\nFAIL: " + "; ".join(fail)); sys.exit(1)
 print(f"\nPASS: no metric regressed by more than {thresh}% with non-overlapping IQRs")
