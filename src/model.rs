@@ -4299,6 +4299,7 @@ impl Qwen3Engine {
     ) -> Result<Arc<Tensor<f16>>> {
         let mut values: Vec<Option<Arc<Tensor<f16>>>> = vec![None; graph.specs.len()];
         let mut remaining_uses = graph.use_counts.clone();
+        let loop_start = profile_ops.then(Instant::now);
         for op in &graph.ops {
             let op_start = if profile_ops {
                 Some(Instant::now())
@@ -4590,7 +4591,22 @@ impl Qwen3Engine {
                 self.profile_op(graph_op_name(op), op_start.elapsed());
             }
 
+            // Between-op work (last-use tensor drops back into the pool) is
+            // profiled as its own pseudo-op so a step's wall time can be
+            // reconciled against the per-op table: anything left over is
+            // per-step setup/teardown outside this loop.
+            let consume_start = profile_ops.then(Instant::now);
             self.consume_graph_inputs_ctx(ctx, graph, pool, &mut values, &mut remaining_uses, op)?;
+            if let Some(consume_start) = consume_start {
+                self.profile_op("ConsumeInputs", consume_start.elapsed());
+            }
+        }
+
+        if let Some(loop_start) = loop_start {
+            // Whole op loop, once per step: step wall - GraphLoop = the
+            // per-step work outside this function (context setup, pool
+            // preparation, logits/argmax handling).
+            self.profile_op("GraphLoop", loop_start.elapsed());
         }
 
         values[graph.final_value.idx()]
