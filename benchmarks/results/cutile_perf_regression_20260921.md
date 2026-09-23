@@ -316,3 +316,42 @@ runs on the default path for every op. Candidates from the diff: per-launch
 `ToolkitCapabilities` / target-gate lookups on the generated launcher's
 non-execute path, or the launch-site specialization cache no longer hitting
 (0.3.1's cache-hit path was what made launches cheap).
+
+## 2026-09-22 (night): the #298 cost is ONE KERNEL running slower, not host overhead
+
+Reconciling the pp18 prefill step with the new `GraphLoop`/`ConsumeInputs`
+pseudo-ops (four arms interleaved, per step, µs):
+
+| | pre-#275 | v0.3.1 | main 6b6351b | fix 6f163d2 | main − pre |
+|---|---:|---:|---:|---:|---:|
+| step wall | 6699 | 6696 | 7037 | 7014 | **+338** |
+| host op loop (GraphLoop) | 2068 | 2002 | 2089 | 2078 | +21 |
+| outside the host loop | 4631 | 4694 | 4948 | 4936 | **+317** |
+
+The host loop — every launcher call, every pool drop — is within 21 µs of
+pre-#275. The +0.3 ms is device time. `GROUT_PROFILE_SYNC_OPS=1` (stream
+sync after each op, so per-op time = launch + kernel) pins it to a single
+kernel:
+
+| op (sync mode, avg µs) | calls | pre-#275 | v0.3.1 | main | fix 6f163d2 |
+|---|---:|---:|---:|---:|---:|
+| **QkNormRopeKvPrefill** | 36 | 19.96 | 19.43 | **26.86** | **27.00** |
+| MatMulSlice / MatMul (cuBLAS) | 180 / 72 | 26.3 / 32.7 | 26.2 / 32.5 | 26.1 / 32.5 | 26.2 / 32.5 |
+| Attention | 36 | 10.60 | 10.20 | 10.38 | 10.27 |
+| AddRmsNorm / RmsNorm / Add / SiluMul | 36–37 | 10.8 / 8.8 / 7.3 / 7.2 | 10.2 / 8.4 / 6.9 / 6.7 | 10.7 / 8.3 / 6.9 / 6.8 | 10.7 / 8.5 / 6.9 / 6.9 |
+| **Σ per step** | | 9988 | 9843 | 10127 | 10162 |
+
+`QkNormRopeKvPrefill` (the fused wide Q/K/V norm + RoPE + KV-cache write
+kernels, `q_norm_rope_prefill_wide_f16` / `k_norm_rope_v_prefill_wide_f16`)
+takes **+7 µs per call, ×36 calls = +250 µs per step** from #298 onward;
+every other kernel is at parity. Site-miss fix 6f163d2 is irrelevant to it.
+#298 shipped "Tile IR 13.4 bytecode with selected-assembler version
+negotiation" — the likely mechanism is that this kernel is now assembled
+through a different bytecode version / tileiras path and gets different SASS.
+Check: dump the cubin for that kernel at e04245b vs 3ac6fb9 (same source,
+same generics) and diff register/SASS; the check-placement counts are
+identical, so it is codegen, not the kernel body.
+
+Earlier framings in this report ("await path", "site-miss path") were
+wrong about the location; the per-op host tables were at parity all along
+once measured carefully, and the step-time gap was device time.
