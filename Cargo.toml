@@ -20,9 +20,6 @@ tokenizers = "0.20.4"
 
 cudarc = { version = "0.19.2", default-features = false, features = ["std", "cublas", "dynamic-loading", "cuda-13010"] }
 
-cuda-core = "0.4.0"
-cuda-async = "0.4.0"
-cutile-compiler = "0.4.0"
 cutile = { version = "0.4.0", features = ["experimental-tune"] }
 
 [features]

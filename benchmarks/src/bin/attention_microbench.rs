@@ -3,8 +3,8 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use clap::Parser;
-use cuda_async::device_operation::{value, with_context, DeviceOp};
-use cuda_core::Stream;
+use cutile::cuda_async::device_operation::{value, with_context, DeviceOp};
+use cutile::cuda_core::Stream;
 use cutile::tensor::{IntoPartition, Reshape, Tensor, ToHostVec};
 use cutile::tile_kernel::TileKernel;
 use cutile::{api, core::f16};

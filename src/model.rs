@@ -18,10 +18,10 @@ use crate::kernels::{
 };
 use crate::loader::WeightLoader;
 use anyhow::{Context, Result, bail, ensure};
-use cuda_async::cuda_graph::CudaGraph;
-use cuda_async::device_operation::{DeviceOp, ExecutionContext, GraphNode, value, with_context};
-use cuda_async::error::DeviceError;
-use cuda_core::{
+use cutile::cuda_async::cuda_graph::CudaGraph;
+use cutile::cuda_async::device_operation::{DeviceOp, ExecutionContext, GraphNode, value, with_context};
+use cutile::cuda_async::error::DeviceError;
+use cutile::cuda_core::{
     IntoResult, memcpy_dtod_async, memcpy_dtoh_async, memcpy_htod_async, sys as cu_sys,
 };
 use cutile::api;
@@ -62,9 +62,9 @@ impl<F: FnOnce(&ExecutionContext) -> Result<(), DeviceError> + Send> std::future
     for KernelGraphOp<F>
 {
     type Output = Result<(), DeviceError>;
-    type IntoFuture = cuda_async::device_future::DeviceFuture<(), Self>;
+    type IntoFuture = cutile::cuda_async::device_future::DeviceFuture<(), Self>;
     fn into_future(self) -> Self::IntoFuture {
-        cuda_async::device_future::DeviceFuture::failed(DeviceError::Internal(
+        cutile::cuda_async::device_future::DeviceFuture::failed(DeviceError::Internal(
             "KernelGraphOp is only for graph capture, not standalone execution".into(),
         ))
     }
@@ -265,7 +265,7 @@ impl TunedDefaults {
             return Self::default();
         };
         let tileiras =
-            cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string();
+            cutile::cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string();
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
@@ -1508,9 +1508,9 @@ impl Qwen3Engine {
         // benchmarking, where cold JIT is the measurement).
         if env_bool_or("GROUT_JIT_CACHE", true) {
             let enabled = match std::env::var("GROUT_JIT_CACHE_DIR") {
-                Ok(dir) => cutile_compiler::jit_cache::FileSystemJitStore::new(dir)
-                    .map(|s| cutile_compiler::jit_cache::enable(std::sync::Arc::new(s))),
-                Err(_) => cutile_compiler::jit_cache::enable_default(),
+                Ok(dir) => cutile::cutile_compiler::jit_cache::FileSystemJitStore::new(dir)
+                    .map(|s| cutile::cutile_compiler::jit_cache::enable(std::sync::Arc::new(s))),
+                Err(_) => cutile::cutile_compiler::jit_cache::enable_default(),
             };
             if let Err(e) = enabled {
                 eprintln!("persistent JIT cache unavailable ({e}); continuing without");
@@ -2474,7 +2474,7 @@ impl Qwen3Engine {
     //     ctx: &ExecutionContext,
     //     position_start: usize,
     // ) -> Result<DecodeCudaGraphRunner> {
-    //     cuda_async::device_context::with_global_device_context(ctx.get_device_id(), |_| ())?;
+    //     cutile::cuda_async::device_context::with_global_device_context(ctx.get_device_id(), |_| ())?;
     //     ensure!(
     //         position_start <= u32::MAX as usize,
     //         "position_start {} exceeds u32 range",
@@ -2523,7 +2523,7 @@ impl Qwen3Engine {
     /// the graph replays into the same device pointers.
     fn build_decode_graph_scope(
         &mut self,
-        stream: &Arc<cuda_core::Stream>,
+        stream: &Arc<cutile::cuda_core::Stream>,
         position_start: usize,
     ) -> Result<DecodeCudaGraphRunner> {
         ensure!(
@@ -6468,7 +6468,7 @@ fn graph_op_name(op: &GraphOp) -> &'static str {
     }
 }
 
-fn build_inv_freq(stream: &Arc<cuda_core::Stream>, cfg: &Qwen3Config) -> Result<Arc<Tensor<f32>>> {
+fn build_inv_freq(stream: &Arc<cutile::cuda_core::Stream>, cfg: &Qwen3Config) -> Result<Arc<Tensor<f32>>> {
     let mut inv = Vec::with_capacity(cfg.head_dim / 2);
     for i in (0..cfg.head_dim).step_by(2) {
         let p = (i as f32) / (cfg.head_dim as f32);
@@ -6483,7 +6483,7 @@ fn build_inv_freq(stream: &Arc<cuda_core::Stream>, cfg: &Qwen3Config) -> Result<
 
 fn load_layer_weight(
     loader: &WeightLoader,
-    stream: &Arc<cuda_core::Stream>,
+    stream: &Arc<cutile::cuda_core::Stream>,
     idx: usize,
     suffix: &str,
     human_name: &str,
@@ -6498,7 +6498,7 @@ fn load_layer_weight(
 /// All inputs must have the same number of columns.
 /// Returns an Arc<Tensor> of shape [sum_of_rows, cols].
 fn concat_weight_rows_2d(
-    stream: &Arc<cuda_core::Stream>,
+    stream: &Arc<cutile::cuda_core::Stream>,
     tensors: &[&Arc<Tensor<f16>>],
 ) -> Result<Arc<Tensor<f16>>> {
     ensure!(
@@ -6530,8 +6530,8 @@ fn concat_weight_rows_2d(
     let total_bytes = total_elements * size_of::<f16>();
 
     // Allocate the merged tensor and copy each source into it.
-    let ctx = cuda_async::device_operation::ExecutionContext::new(stream.clone());
-    let dst_ptr = unsafe { cuda_core::malloc_async(total_bytes, stream) }
+    let ctx = cutile::cuda_async::device_operation::ExecutionContext::new(stream.clone());
+    let dst_ptr = unsafe { cutile::cuda_core::malloc_async(total_bytes, stream) }
         .driver_result()
         .map_err(|e| anyhow::anyhow!("malloc_async({total_bytes} B) failed: {e:?}"))?;
     let mut offset_bytes = 0u64;
@@ -6542,7 +6542,7 @@ fn concat_weight_rows_2d(
         {
             // Best-effort release of the partially filled buffer; the copy
             // error is the one worth reporting.
-            let _ = unsafe { cuda_core::free_async(dst_ptr, stream) }.driver_result();
+            let _ = unsafe { cutile::cuda_core::free_async(dst_ptr, stream) }.driver_result();
             bail!("concat_weight_rows_2d D2D failed: {e:?}");
         }
         offset_bytes += *t_bytes as u64;

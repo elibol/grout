@@ -905,7 +905,7 @@ fn main() -> Result<()> {
     let mut engine_slot: Option<Qwen3Engine> =
         Some(load_engine(&rt, &model_dir, args.max_seq_len)?);
 
-    let tileiras = cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string();
+    let tileiras = cutile::cutile_compiler::cuda_tile_runtime_utils::tileiras_fingerprint().to_string();
 
     if args.gate_probe > 0 {
         let site_list = sites(args.max_seq_len, &pp_buckets);

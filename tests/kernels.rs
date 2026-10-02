@@ -1,6 +1,6 @@
 use anyhow::Result;
-use cuda_async::device_operation::{DeviceOp, value};
-use cuda_core::Device;
+use cutile::cuda_async::device_operation::{DeviceOp, value};
+use cutile::cuda_core::Device;
 use cutile::api::{self, DeviceOpReshape};
 use cutile::core::f16;
 use cutile::tensor::{IntoPartition, PartitionMut as _, ToHostVec};

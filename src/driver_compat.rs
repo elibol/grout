@@ -1,7 +1,7 @@
 //! Source-level compatibility for the raw driver wrappers across cutile-rs
 //! 0.3.0 and 0.3.1.
 //!
-//! In 0.3.0, `cuda_core::{malloc_async, memcpy_*_async, free_async}` returned
+//! In 0.3.0, `cutile::cuda_core::{malloc_async, memcpy_*_async, free_async}` returned
 //! the bare value (`CUdeviceptr` / `()`) and panicked internally on a driver
 //! error. In 0.3.1 they return `Result<_, DriverError>` so a failed device
 //! allocation can be handled instead of aborting the process. Grout wants the
@@ -10,7 +10,7 @@
 //! [`DriverCall::driver_result`], which is the identity on a `Result` and
 //! wraps a bare value in `Ok`.
 
-use cuda_core::DriverError;
+use cutile::cuda_core::DriverError;
 
 pub trait DriverCall<T> {
     fn driver_result(self) -> Result<T, DriverError>;

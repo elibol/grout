@@ -15,8 +15,8 @@
 
 use anyhow::{anyhow, ensure, Context, Result};
 use clap::Parser;
-use cuda_async::device_operation::DeviceOp;
-use cuda_core::{Device, Stream};
+use cutile::cuda_async::device_operation::DeviceOp;
+use cutile::cuda_core::{Device, Stream};
 use cutile::api::{self, DeviceOpReshape};
 use cutile::core::f16;
 use cutile::tensor::{Tensor, ToHostVec};
