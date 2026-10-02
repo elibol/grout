@@ -386,3 +386,29 @@ Status of the 0.4.0 line through grout, once #310 is on main: decode within
 0.4% of 0.3.0/0.3.1, prefill at parity at every length, numerics identical.
 Re-run `benchmarks/cutile_perf_regression.sh v0.3.1 HEAD` on the merged rev
 before re-pinning; a quiet system is required for the pp18 cell.
+
+## 2026-10-02: released cutile-rs v0.4.0 (76eae28, crates.io) vs v0.3.1 — PASS; line closed
+
+Grout `safe-kernels` @ a667329 (now depending on the `cutile` crate alone),
+quiet 5090, records off, 4 rounds × 3 reps:
+
+| cell | metric | v0.3.1 | v0.4.0 | ratio | v0.3.1 IQR | v0.4.0 IQR |
+|---|---|---:|---:|---:|---|---|
+| pp18_tg128 | prefill_ms | 6.74 | 6.76 | 1.004 | 6.7–6.8 | 6.8–6.8 |
+| pp18_tg128 | decode_tok_s | 176.60 | 176.25 | 0.998 | 176.5–176.6 | 176.2–176.3 |
+| pp2048_tg128 | prefill_ms | 57.77 | 57.85 | 1.001 | 57.8–57.8 | 57.8–57.9 |
+| pp2048_tg128 | decode_tok_s | 169.20 | 168.90 | 0.998 | 169.1–169.2 | 168.9–168.9 |
+| pp8192_tg16 | prefill_ms | 388.33 | 388.22 | 1.000 | 388.1–388.9 | 388.1–388.9 |
+| pp8192_tg16 | decode_tok_s | 162.50 | 162.10 | 0.998 | 162.4–162.5 | 162.0–162.1 |
+
+Per-launch host cost: sum of launches per prefill step 1862 → 1855 µs
+(0.996); Attention 3.65 → 3.30, AddRmsNorm 3.11 → 2.97, RmsNorm 2.38 → 2.23
+— the site-miss fix (#307) shows as a small per-launch *gain* over 0.3.1.
+
+Summary of the 0.4.0 line as shipped, through grout: prefill at parity at
+every length, decode −0.2%, numerics identical (attention/GEMM hashes and
+greedy text), tuning records load. The three regressions found along the
+way (#275 submission overhead on graph replay, #298 token chaining in the
+two wide norm/RoPE kernels, and the launch-site miss path cost) are all
+fixed in the release (#302, #310, #307). Grout is pinned to crates.io 0.4.0
+with no path patch.
